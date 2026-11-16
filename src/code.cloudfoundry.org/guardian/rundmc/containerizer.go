@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/guardian/gardener"
 	spec "code.cloudfoundry.org/guardian/gardener/container-spec"

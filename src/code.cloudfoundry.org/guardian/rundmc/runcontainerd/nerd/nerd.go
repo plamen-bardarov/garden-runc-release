@@ -72,7 +72,8 @@ func (n *Nerd) Create(log lager.Logger, containerID string, spec *specs.Spec, ho
 		// containerd for non-runc runtimes; the VM runtime shim owns the IO.
 		taskOpts = nil
 	}
-	task, err := container.NewTask(n.context, cio.NewCreator(withProcessIO(noTTYProcessIO(pio), n.ioFifoDir)), taskOpts...)
+	initIO := noTTYProcessIO(pio)
+	task, err := container.NewTask(n.context, cio.NewCreator(withProcessIO(initIO, n.ioFifoDir, n.vmRuntime)), taskOpts...)
 	if err != nil {
 		return err
 	}
@@ -83,7 +84,23 @@ func (n *Nerd) Create(log lager.Logger, containerID string, spec *specs.Spec, ho
 		return err
 	}
 
+	if !n.stdinAttached(initIO) {
+		return nil
+	}
 	return task.CloseIO(n.context, client.WithStdinCloser)
+}
+
+// stdinAttached reports whether a stdin stream is attached to a process.
+// With VM runtimes stdin is only attached when the caller provides one: the
+// Kata shim's CloseIO holds the shim lock until it has read EOF from stdin
+// (and forever if there is no stdin), which would block every other request
+// to the shim (State, Exec, Wait, ...).
+func (n *Nerd) stdinAttached(processIO func() (io.Reader, io.Writer, io.Writer, bool)) bool {
+	if !n.vmRuntime {
+		return true
+	}
+	stdin, _, _, _ := processIO()
+	return stdin != nil
 }
 
 func withProcessKillLogging(log lager.Logger, mp *metrics.MetricsProvider) func(context.Context, client.Process) error {
@@ -214,7 +231,7 @@ func (n *Nerd) Exec(log lager.Logger, containerID, processID string, spec *specs
 	}
 
 	log.Debug("execing-task", lager.Data{"containerID": containerID, "processID": processID})
-	process, err := task.Exec(n.context, processID, spec, cio.NewCreator(withProcessIO(processIO, n.ioFifoDir)))
+	process, err := task.Exec(n.context, processID, spec, cio.NewCreator(withProcessIO(processIO, n.ioFifoDir, n.vmRuntime)))
 	if err != nil {
 		return BackingProcess{}, err
 	}
@@ -224,8 +241,10 @@ func (n *Nerd) Exec(log lager.Logger, containerID, processID string, spec *specs
 		return BackingProcess{}, err
 	}
 
-	log.Debug("closing-stdin", lager.Data{"containerID": containerID, "processID": processID})
-	go exponentialBackoffCloseIO(process, n.context, log, containerID)
+	if n.stdinAttached(processIO) {
+		log.Debug("closing-stdin", lager.Data{"containerID": containerID, "processID": processID})
+		go exponentialBackoffCloseIO(process, n.context, log, containerID)
+	}
 
 	return NewBackingProcess(log, process, n.context), nil
 }
@@ -279,16 +298,19 @@ func noTTYProcessIO(initProcessIO func() (io.Reader, io.Writer, io.Writer)) func
 	}
 }
 
-func withProcessIO(processIO func() (io.Reader, io.Writer, io.Writer, bool), ioFifoDir string) cio.Opt {
+func withProcessIO(processIO func() (io.Reader, io.Writer, io.Writer, bool), ioFifoDir string, keepNilStdin bool) cio.Opt {
 	return func(opt *cio.Streams) {
 		stdin, stdout, stderr, hasTTY := processIO()
+		if !keepNilStdin {
+			stdin = orEmpty(stdin)
+		}
 
 		cio.WithFIFODir(ioFifoDir)(opt)
 		if hasTTY {
 			cio.WithTerminal(opt)
-			cio.WithStreams(orEmpty(stdin), orDiscard(stdout), nil)(opt)
+			cio.WithStreams(stdin, orDiscard(stdout), nil)(opt)
 		} else {
-			cio.WithStreams(orEmpty(stdin), orDiscard(stdout), orDiscard(stderr))(opt)
+			cio.WithStreams(stdin, orDiscard(stdout), orDiscard(stderr))(opt)
 		}
 	}
 }
