@@ -73,6 +73,10 @@ func (n *Nerd) Create(log lager.Logger, containerID string, spec *specs.Spec, ho
 		taskOpts = nil
 	}
 	initIO := noTTYProcessIO(pio)
+	var stdinDone <-chan struct{}
+	if n.vmRuntime {
+		initIO, stdinDone = notifyOnStdinDone(initIO)
+	}
 	task, err := container.NewTask(n.context, cio.NewCreator(withProcessIO(initIO, n.ioFifoDir, n.vmRuntime)), taskOpts...)
 	if err != nil {
 		return err
@@ -84,23 +88,11 @@ func (n *Nerd) Create(log lager.Logger, containerID string, spec *specs.Spec, ho
 		return err
 	}
 
-	if !n.stdinAttached(initIO) {
+	if n.vmRuntime {
+		closeStdinWhenDone(n.context, log, task, containerID, stdinDone)
 		return nil
 	}
 	return task.CloseIO(n.context, client.WithStdinCloser)
-}
-
-// stdinAttached reports whether a stdin stream is attached to a process.
-// With VM runtimes stdin is only attached when the caller provides one: the
-// Kata shim's CloseIO holds the shim lock until it has read EOF from stdin
-// (and forever if there is no stdin), which would block every other request
-// to the shim (State, Exec, Wait, ...).
-func (n *Nerd) stdinAttached(processIO func() (io.Reader, io.Writer, io.Writer, bool)) bool {
-	if !n.vmRuntime {
-		return true
-	}
-	stdin, _, _, _ := processIO()
-	return stdin != nil
 }
 
 func withProcessKillLogging(log lager.Logger, mp *metrics.MetricsProvider) func(context.Context, client.Process) error {
@@ -231,6 +223,10 @@ func (n *Nerd) Exec(log lager.Logger, containerID, processID string, spec *specs
 	}
 
 	log.Debug("execing-task", lager.Data{"containerID": containerID, "processID": processID})
+	var stdinDone <-chan struct{}
+	if n.vmRuntime {
+		processIO, stdinDone = notifyOnStdinDone(processIO)
+	}
 	process, err := task.Exec(n.context, processID, spec, cio.NewCreator(withProcessIO(processIO, n.ioFifoDir, n.vmRuntime)))
 	if err != nil {
 		return BackingProcess{}, err
@@ -241,7 +237,9 @@ func (n *Nerd) Exec(log lager.Logger, containerID, processID string, spec *specs
 		return BackingProcess{}, err
 	}
 
-	if n.stdinAttached(processIO) {
+	if n.vmRuntime {
+		closeStdinWhenDone(n.context, log, process, containerID, stdinDone)
+	} else {
 		log.Debug("closing-stdin", lager.Data{"containerID": containerID, "processID": processID})
 		go exponentialBackoffCloseIO(process, n.context, log, containerID)
 	}

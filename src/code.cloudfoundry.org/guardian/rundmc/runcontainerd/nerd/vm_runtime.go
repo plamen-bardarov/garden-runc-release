@@ -1,7 +1,10 @@
 package nerd
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"sync"
 	"syscall"
 	"time"
 
@@ -147,4 +150,63 @@ func (n *Nerd) KillAll(log lager.Logger, id string, kill bool) error {
 
 	log.Debug("kill-all", lager.Data{"containerID": id, "signal": signal.String()})
 	return task.Kill(n.context, signal, client.WithKillAll)
+}
+
+// notifyOnStdinDone wraps the stdin of a process IO so that the returned
+// channel is closed once stdin has been fully read (EOF) or failed. A nil
+// channel is returned when there is no stdin.
+//
+// With VM runtimes stdin must only be closed (CloseIO) after that: the Kata
+// shim's CloseIO holds the shim lock until its own stdin copy has finished,
+// i.e. until the caller's stdin reached EOF. The garden server attaches a
+// stdin pipe to every process which is only closed when the client closes
+// stdin or disconnects, so an immediate CloseIO of a long running process
+// (app, envoy, health checks) would block every request to the shim.
+func notifyOnStdinDone(processIO func() (io.Reader, io.Writer, io.Writer, bool)) (func() (io.Reader, io.Writer, io.Writer, bool), <-chan struct{}) {
+	stdin, stdout, stderr, tty := processIO()
+	var done chan struct{}
+	if stdin != nil {
+		done = make(chan struct{})
+		stdin = &doneNotifyingReader{reader: stdin, done: done}
+	}
+	return func() (io.Reader, io.Writer, io.Writer, bool) {
+		return stdin, stdout, stderr, tty
+	}, done
+}
+
+type doneNotifyingReader struct {
+	reader io.Reader
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (r *doneNotifyingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil {
+		r.once.Do(func() { close(r.done) })
+	}
+	return n, err
+}
+
+type stdinCloser interface {
+	ID() string
+	CloseIO(ctx context.Context, opts ...client.IOCloserOpts) error
+}
+
+// closeStdinWhenDone closes the stdin of a process in the background once
+// stdinDone is closed. containerd closes the stdin FIFO after copying the
+// last byte, so by then the shim's stdin copy is (about to be) done and
+// CloseIO returns promptly. Nothing is done when there is no stdin.
+func closeStdinWhenDone(ctx context.Context, log lager.Logger, process stdinCloser, containerID string, stdinDone <-chan struct{}) {
+	if stdinDone == nil {
+		return
+	}
+	go func() {
+		<-stdinDone
+		log.Debug("closing-stdin", lager.Data{"containerID": containerID, "processID": process.ID()})
+		if err := process.CloseIO(ctx, client.WithStdinCloser); err != nil {
+			// e.g. the process has already exited and been deleted
+			log.Info("closing-stdin-failed", lager.Data{"containerID": containerID, "processID": process.ID(), "error": err.Error()})
+		}
+	}()
 }
