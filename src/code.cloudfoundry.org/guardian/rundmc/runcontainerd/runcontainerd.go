@@ -128,6 +128,7 @@ func (r *RunContainerd) Create(log lager.Logger, id string, bundle goci.Bndl, pi
 	updateAnnotationsIfNeeded(&bundle)
 	if r.isVMRuntime() {
 		addSandboxAnnotations(&bundle, id)
+		removeUserNamespace(&bundle)
 	}
 	log.Debug("Annotations after update", lager.Data{"id": id, "Annotations": bundle.Spec.Annotations})
 

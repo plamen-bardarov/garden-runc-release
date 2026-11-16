@@ -1,6 +1,7 @@
 package privchecker
 
 import (
+	"code.cloudfoundry.org/guardian/rundmc/goci"
 	"code.cloudfoundry.org/lager/v3"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -21,11 +22,5 @@ func (p *PrivilegeChecker) Privileged(id string) (bool, error) {
 		return false, err
 	}
 
-	for _, namespace := range spec.Linux.Namespaces {
-		if namespace.Type == "user" {
-			return false, nil
-		}
-	}
-
-	return true, nil
+	return goci.IsPrivileged(goci.Bndl{Spec: *spec}), nil
 }

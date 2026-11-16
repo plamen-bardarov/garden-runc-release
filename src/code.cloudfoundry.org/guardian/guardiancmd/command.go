@@ -291,6 +291,9 @@ func (cmd *CommonCommand) createWiring(logger lager.Logger, metricsProvider *met
 	}
 
 	volumizer := factory.WireVolumizer(logger)
+	if cmd.Containerd.VMRuntime {
+		volumizer = gardener.UnshiftedRootFSVolumizer{Volumizer: volumizer}
+	}
 
 	starters := []gardener.Starter{}
 	if !cmd.Server.SkipSetup {

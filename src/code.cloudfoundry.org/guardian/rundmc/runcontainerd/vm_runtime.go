@@ -70,6 +70,35 @@ func addSandboxAnnotations(bundle *goci.Bndl, id string) {
 	bundle.Spec.Annotations[SandboxIDAnnotation] = id
 }
 
+// removeUserNamespace drops the user namespace and id mappings from the spec
+// of unprivileged containers. Kata Containers fails to create containers with
+// a user namespace (EPERM from the guest agent); the VM is the isolation
+// boundary instead. The container stays unprivileged for garden through
+// goci.UnprivilegedAnnotation, and its root filesystem must not be id-shifted
+// (see gardener.UnshiftedRootFSVolumizer).
+func removeUserNamespace(bundle *goci.Bndl) {
+	if bundle.Spec.Linux == nil {
+		return
+	}
+
+	hadUserNamespace := false
+	namespaces := bundle.Spec.Linux.Namespaces[:0]
+	for _, ns := range bundle.Spec.Linux.Namespaces {
+		if ns.Type == goci.UserNamespace.Type {
+			hadUserNamespace = true
+			continue
+		}
+		namespaces = append(namespaces, ns)
+	}
+	bundle.Spec.Linux.Namespaces = namespaces
+	bundle.Spec.Linux.UIDMappings = nil
+	bundle.Spec.Linux.GIDMappings = nil
+
+	if hadUserNamespace {
+		bundle.Spec.Annotations[goci.UnprivilegedAnnotation] = "true"
+	}
+}
+
 // StopAll implements rundmc.ProcessesStopper for VM runtimes by signalling
 // all processes of the container task through containerd.
 func (r *RunContainerd) StopAll(log lager.Logger, handle string, _ []int, kill bool) error {

@@ -66,6 +66,32 @@ var _ = Describe("Runcontainerd with a VM runtime", func() {
 			Expect(spec.Annotations).To(HaveKeyWithValue(runcontainerd.SandboxIDAnnotation, "app-handle"))
 		})
 
+		It("removes the user namespace and id mappings, which the VM runtime does not support, but keeps the container unprivileged", func() {
+			bundle := goci.Bndl{Spec: specs.Spec{Linux: &specs.Linux{}}}.
+				WithNamespaces(goci.NetworkNamespace, goci.UserNamespace, goci.PIDNamespace).
+				WithUIDMappings(specs.LinuxIDMapping{ContainerID: 0, HostID: 4294967294, Size: 1}).
+				WithGIDMappings(specs.LinuxIDMapping{ContainerID: 0, HostID: 4294967294, Size: 1})
+			Expect(runContainerd.Create(log, "app-handle", bundle, garden.ProcessIO{})).To(Succeed())
+
+			_, _, spec, rootUID, rootGID, _ := containerManager.CreateArgsForCall(0)
+			Expect(spec.Linux.Namespaces).NotTo(ContainElement(goci.UserNamespace))
+			Expect(spec.Linux.Namespaces).To(ContainElements(goci.NetworkNamespace, goci.PIDNamespace))
+			Expect(spec.Linux.UIDMappings).To(BeEmpty())
+			Expect(spec.Linux.GIDMappings).To(BeEmpty())
+			Expect(rootUID).To(BeEquivalentTo(0))
+			Expect(rootGID).To(BeEquivalentTo(0))
+			Expect(spec.Annotations).To(HaveKeyWithValue(goci.UnprivilegedAnnotation, "true"))
+			Expect(goci.IsPrivileged(goci.Bndl{Spec: *spec})).To(BeFalse())
+		})
+
+		It("does not mark privileged containers (no user namespace) as unprivileged", func() {
+			bundle := goci.Bndl{Spec: specs.Spec{Linux: &specs.Linux{}}}.WithNamespaces(goci.NetworkNamespace)
+			Expect(runContainerd.Create(log, "priv-handle", bundle, garden.ProcessIO{})).To(Succeed())
+
+			_, _, spec, _, _, _ := containerManager.CreateArgsForCall(0)
+			Expect(spec.Annotations).NotTo(HaveKey(goci.UnprivilegedAnnotation))
+		})
+
 		It("runs peas as containers inside the sandbox of the container they belong to", func() {
 			bundle := goci.Bndl{Spec: specs.Spec{
 				Linux:       &specs.Linux{},

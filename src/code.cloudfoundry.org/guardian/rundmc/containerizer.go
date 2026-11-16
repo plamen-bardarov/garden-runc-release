@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/guardian/gardener"
@@ -376,13 +375,7 @@ func (c *Containerizer) Info(log lager.Logger, handle string) (spec.ActualContai
 		return spec.ActualContainerSpec{}, err
 	}
 
-	privileged := true
-	for _, ns := range bundle.Namespaces() {
-		if ns.Type == specs.UserNamespace {
-			privileged = false
-			break
-		}
-	}
+	privileged := goci.IsPrivileged(bundle)
 
 	var cpuShares, limitInBytes uint64
 	if bundle.Resources() != nil {
