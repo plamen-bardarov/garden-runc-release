@@ -117,6 +117,24 @@ var _ = Describe("Runcontainerd with a VM runtime", func() {
 			containerManager.ExecReturns(new(runcontainerdfakes.FakeBackingProcess), nil)
 		})
 
+		It("drops the console size of processes without a terminal (Kata would try to resize a non-existent tty)", func() {
+			processBuilder.BuildProcessReturns(&specs.Process{Terminal: false, ConsoleSize: &specs.Box{Width: 80, Height: 24}})
+			_, err := runContainerd.Exec(log, "app-handle", garden.ProcessSpec{User: "vcap"}, garden.ProcessIO{})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, _, _, process, _ := containerManager.ExecArgsForCall(0)
+			Expect(process.ConsoleSize).To(BeNil())
+		})
+
+		It("keeps the console size of terminal processes", func() {
+			processBuilder.BuildProcessReturns(&specs.Process{Terminal: true, ConsoleSize: &specs.Box{Width: 80, Height: 24}})
+			_, err := runContainerd.Exec(log, "app-handle", garden.ProcessSpec{User: "vcap", TTY: &garden.TTYSpec{}}, garden.ProcessIO{})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, _, _, process, _ := containerManager.ExecArgsForCall(0)
+			Expect(process.ConsoleSize).To(Equal(&specs.Box{Width: 80, Height: 24}))
+		})
+
 		It("resolves users and creates the working dir in the container rootfs on the host, not in /proc/<hypervisor-pid>/root", func() {
 			_, err := runContainerd.Exec(log, "app-handle", garden.ProcessSpec{User: "vcap"}, garden.ProcessIO{})
 			Expect(err).NotTo(HaveOccurred())

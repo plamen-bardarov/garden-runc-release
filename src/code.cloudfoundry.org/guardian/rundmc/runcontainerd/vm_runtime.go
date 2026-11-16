@@ -11,6 +11,7 @@ import (
 	"code.cloudfoundry.org/guardian/rundmc/goci"
 	"code.cloudfoundry.org/lager/v3"
 	uuid "github.com/nu7hatch/gouuid"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // OCI annotations understood by Kata Containers (and other sandbox based
@@ -68,6 +69,16 @@ func addSandboxAnnotations(bundle *goci.Bndl, id string) {
 
 	bundle.Spec.Annotations[SandboxContainerTypeAnnotation] = SandboxContainerTypeSandbox
 	bundle.Spec.Annotations[SandboxIDAnnotation] = id
+}
+
+// clearConsoleSizeWithoutTerminal drops the console size of processes without
+// a terminal. Per the OCI spec consoleSize only applies with terminal=true and
+// runc ignores it, but the Kata shim resizes the (non-existent) tty of every
+// exec with a console size, which the agent rejects with "no tty".
+func clearConsoleSizeWithoutTerminal(process *specs.Process) {
+	if process != nil && !process.Terminal {
+		process.ConsoleSize = nil
+	}
 }
 
 // removeUserNamespace drops the user namespace and id mappings from the spec

@@ -129,6 +129,7 @@ func (r *RunContainerd) Create(log lager.Logger, id string, bundle goci.Bndl, pi
 	if r.isVMRuntime() {
 		addSandboxAnnotations(&bundle, id)
 		removeUserNamespace(&bundle)
+		clearConsoleSizeWithoutTerminal(bundle.Spec.Process)
 	}
 	log.Debug("Annotations after update", lager.Data{"id": id, "Annotations": bundle.Spec.Annotations})
 
@@ -220,6 +221,9 @@ func (r *RunContainerd) Exec(log lager.Logger, containerID string, gardenProcess
 	}
 
 	ociProcessSpec := r.processBuilder.BuildProcess(bundle, gardenProcessSpec, resolvedUser)
+	if r.isVMRuntime() {
+		clearConsoleSizeWithoutTerminal(ociProcessSpec)
+	}
 	process, err := r.containerManager.Exec(log, containerID, gardenProcessSpec.ID, ociProcessSpec, processIO)
 	if err != nil {
 		if isNoSuchExecutable(err) {
