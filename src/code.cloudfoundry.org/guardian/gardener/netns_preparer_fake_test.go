@@ -9,6 +9,7 @@ type fakeNetnsPreparer struct {
 	nsPath    string
 	err       error
 	prepared  []string
+	adjusted  []string
 	released  []string
 	doneCalls int
 }
@@ -19,6 +20,11 @@ func (f *fakeNetnsPreparer) Prepare(_ lager.Logger, handle string) (int, string,
 	}
 	f.prepared = append(f.prepared, handle)
 	return f.pid, f.nsPath, func() { f.doneCalls++ }, nil
+}
+
+func (f *fakeNetnsPreparer) AdjustForRuntime(_ lager.Logger, handle string) error {
+	f.adjusted = append(f.adjusted, handle)
+	return nil
 }
 
 func (f *fakeNetnsPreparer) Release(_ lager.Logger, handle string) error {

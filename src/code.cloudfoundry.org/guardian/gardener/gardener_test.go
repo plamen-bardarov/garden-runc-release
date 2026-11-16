@@ -435,6 +435,7 @@ var _ = Describe("Gardener", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				Expect(preparer.prepared).To(Equal([]string{"bob"}))
+				Expect(preparer.adjusted).To(Equal([]string{"bob"}))
 				_, _, pid := networker.NetworkArgsForCall(0)
 				Expect(pid).To(Equal(4242))
 

@@ -90,6 +90,10 @@ type NetworkNamespacePreparer interface {
 	// Networker), a stable path to the namespace (to be used in the OCI spec)
 	// and a function that must be called once the container has been created.
 	Prepare(log lager.Logger, handle string) (pid int, nsPath string, done func(), err error)
+	// AdjustForRuntime is called after the Networker has configured the
+	// prepared namespace and before the container is created. It adapts the
+	// network configuration to what the VM runtime can replicate in the guest.
+	AdjustForRuntime(log lager.Logger, handle string) error
 	// Release releases the stable namespace path of the given handle. It must
 	// be idempotent.
 	Release(log lager.Logger, handle string) error
@@ -330,6 +334,11 @@ func (g *Gardener) Create(containerSpec garden.ContainerSpec) (ctr garden.Contai
 		defer netnsDone()
 
 		if err = g.Networker.Network(log, containerSpec, netnsHolderPid); err != nil {
+			return nil, err
+		}
+
+		if err = g.NetworkNamespacePreparer.AdjustForRuntime(log, containerSpec.Handle); err != nil {
+			log.Error("adjusting-network-namespace", err)
 			return nil, err
 		}
 
