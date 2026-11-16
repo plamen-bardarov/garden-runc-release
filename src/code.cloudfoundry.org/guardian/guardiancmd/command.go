@@ -196,6 +196,10 @@ type CommonCommand struct {
 	Containerd struct {
 		Socket                    string `long:"containerd-socket" description:"Path to a containerd socket."`
 		UseContainerdForProcesses bool   `long:"use-containerd-for-processes" description:"Use containerd to run processes in containers."`
+		Runtime                   string `long:"containerd-runtime" description:"containerd runtime used to run containers: a runtime name (e.g. io.containerd.runc.v2) or an absolute path to a shim binary (e.g. /opt/kata/bin/containerd-shim-kata-v2). Defaults to io.containerd.runc.v2."`
+		VMRuntime                 bool   `long:"containerd-vm-runtime" description:"The containerd runtime is VM based (e.g. Kata Containers): containers run in guest VMs and are not reachable through their host PID. Implies --use-containerd-for-processes."`
+		VMMemoryOverheadMB        uint64 `long:"containerd-vm-memory-overhead-mb" default:"0" description:"Memory added to the host cgroup limit of each container for the VM overhead (guest kernel, agent, hypervisor). Only used with --containerd-vm-runtime."`
+		VMNetnsDir                string `long:"containerd-vm-netns-dir" default:"/run/garden-netns" description:"Directory where network namespaces of VM runtime containers are bind mounted."`
 	} `group:"Containerd"`
 
 	CPUThrottling struct {
@@ -226,10 +230,11 @@ type commandWiring struct {
 	Logger                          lager.Logger
 	CpuEntitlementPerShare          float64
 	ContainerNetworkMetricsProvider gardener.ContainerNetworkMetricsProvider
+	NetworkNamespacePreparer        gardener.NetworkNamespacePreparer
 }
 
 func (cmd *CommonCommand) createGardener(wiring *commandWiring) *gardener.Gardener {
-	return gardener.New(wiring.UidGenerator,
+	gdnr := gardener.New(wiring.UidGenerator,
 		wiring.Starter,
 		wiring.SysInfoProvider,
 		wiring.Networker,
@@ -243,9 +248,19 @@ func (cmd *CommonCommand) createGardener(wiring *commandWiring) *gardener.Garden
 		!cmd.Containers.DisablePrivilgedContainers,
 		wiring.ContainerNetworkMetricsProvider,
 	)
+	gdnr.NetworkNamespacePreparer = wiring.NetworkNamespacePreparer
+	return gdnr
 }
 
 func (cmd *CommonCommand) createWiring(logger lager.Logger, metricsProvider *metrics.MetricsProvider) (*commandWiring, error) {
+	if cmd.Containerd.VMRuntime {
+		if !cmd.useContainerd() {
+			return nil, errors.New("--containerd-vm-runtime requires --containerd-socket")
+		}
+		// processes of VM runtime containers can only be run through containerd
+		cmd.Containerd.UseContainerdForProcesses = true
+	}
+
 	factory := cmd.NewGardenFactory()
 
 	propManager, err := cmd.loadProperties(logger, cmd.Containers.PropertiesPath)
@@ -304,6 +319,11 @@ func (cmd *CommonCommand) createWiring(logger lager.Logger, metricsProvider *met
 		return nil, err
 	}
 
+	var netnsPreparer gardener.NetworkNamespacePreparer
+	if cmd.Containerd.VMRuntime {
+		netnsPreparer = newVMNetworkNamespacePreparer(cmd.Containerd.VMNetnsDir)
+	}
+
 	return &commandWiring{
 		Containerizer:                   containerizer,
 		Networker:                       networker,
@@ -318,6 +338,7 @@ func (cmd *CommonCommand) createWiring(logger lager.Logger, metricsProvider *met
 		Logger:                          logger,
 		CpuEntitlementPerShare:          cpuEntitlementPerShare,
 		ContainerNetworkMetricsProvider: factory.WireContainerNetworkMetricsProvider(containerizer, propManager),
+		NetworkNamespacePreparer:        netnsPreparer,
 	}, nil
 }
 
@@ -496,6 +517,9 @@ func (cmd *CommonCommand) wireContainerizer(
 	initMount, initPath := initBindMountAndPath(cmd.Bin.Init.Path())
 
 	defaultMounts := append(defaultBindMounts(), initMount)
+	if cmd.Containerd.VMRuntime {
+		defaultMounts = append(defaultMounts, vmTarBindMount(cmd.Bin.Tar.Path()))
+	}
 	privilegedMounts := append(defaultMounts, privilegedMounts()...)
 	unprivilegedMounts := append(defaultMounts, unprivilegedMounts()...)
 
@@ -632,6 +656,7 @@ func (cmd *CommonCommand) wireContainerizer(
 	containersPidGetter := depotPidGetter
 	peaPidGetter := depotPidGetter
 	runtimeStopper = stopper.NewNoopStopper()
+	var vmRunContainerd *runcontainerd.RunContainerd
 
 	if cmd.useContainerd() {
 		var err error
@@ -653,6 +678,9 @@ func (cmd *CommonCommand) wireContainerizer(
 		peasBundleLoader = peaBundleLoader
 		containersPidGetter = nerdPidGetter
 		runtimeStopper = runContainerd
+		if cmd.Containerd.VMRuntime {
+			vmRunContainerd = runContainerd
+		}
 
 		if cmd.Containerd.UseContainerdForProcesses {
 			peaPidGetter = nerdPidGetter
@@ -700,14 +728,26 @@ func (cmd *CommonCommand) wireContainerizer(
 	}
 
 	nstar := rundmc.NewNstarRunner(cmd.Bin.NSTar.Path(), cmd.Bin.Tar.Path(), cmdRunner)
-	processesStopper := stopper.New(stopper.NewRuncStateCgroupPathResolver(runcRoot), nil, retrier.New(retrier.ConstantBackoff(10, 1*time.Second), nil))
+	var processesStopper rundmc.ProcessesStopper = stopper.New(stopper.NewRuncStateCgroupPathResolver(runcRoot), nil, retrier.New(retrier.ConstantBackoff(10, 1*time.Second), nil))
+	if vmRunContainerd != nil {
+		// VM runtime containers have no runc state and their processes are
+		// not in host cgroups; stop them through containerd instead.
+		processesStopper = vmRunContainerd
+	}
 
 	cpuCgrouper, err := factory.WireCPUCgrouper()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return rundmc.New(depot, template, ociRuntime, nstar, processesStopper, eventStore, stateStore, peaCreator, peaUsernameResolver, cpuEntitlementPerShare, runtimeStopper, cpuCgrouper), peaCleaner, nil
+	containerizer := rundmc.New(depot, template, ociRuntime, nstar, processesStopper, eventStore, stateStore, peaCreator, peaUsernameResolver, cpuEntitlementPerShare, runtimeStopper, cpuCgrouper)
+	if vmRunContainerd != nil {
+		// nstar would enter the mount namespace of the hypervisor process,
+		// i.e. the host. Stream through tar inside the guest instead.
+		containerizer.SetHandleStreamer(vmRunContainerd)
+	}
+
+	return containerizer, peaCleaner, nil
 }
 
 func (cmd *CommonCommand) useContainerd() bool {

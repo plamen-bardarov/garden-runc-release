@@ -416,6 +416,50 @@ var _ = Describe("Gardener", func() {
 			})
 		})
 
+		Context("when a network namespace preparer is configured (VM runtimes)", func() {
+			var preparer *fakeNetnsPreparer
+
+			BeforeEach(func() {
+				preparer = &fakeNetnsPreparer{pid: 4242, nsPath: "/run/garden-netns/bob"}
+				gdnr.NetworkNamespacePreparer = preparer
+			})
+
+			It("networks the prepared namespace before creating the container and passes its path in the spec", func() {
+				containerizer.CreateStub = func(lager.Logger, spec.DesiredContainerSpec) error {
+					Expect(networker.NetworkCallCount()).To(Equal(1), "network must be configured before the container is created")
+					Expect(preparer.doneCalls).To(Equal(0), "netns holder must still be alive while the container is created")
+					return nil
+				}
+
+				_, err := gdnr.Create(garden.ContainerSpec{Handle: "bob"})
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(preparer.prepared).To(Equal([]string{"bob"}))
+				_, _, pid := networker.NetworkArgsForCall(0)
+				Expect(pid).To(Equal(4242))
+
+				_, desired := containerizer.CreateArgsForCall(0)
+				Expect(desired.Namespaces).To(Equal(map[string]string{"network": "/run/garden-netns/bob"}))
+
+				Expect(networker.NetworkCallCount()).To(Equal(1))
+				Expect(preparer.doneCalls).To(Equal(1))
+			})
+
+			It("releases the namespace when the container is destroyed", func() {
+				containerizer.HandlesReturns([]string{"bob"}, nil)
+				Expect(gdnr.Destroy("bob")).To(Succeed())
+				Expect(preparer.released).To(Equal([]string{"bob"}))
+			})
+
+			It("does not create the container when preparing the namespace fails", func() {
+				preparer.err = errors.New("no netns")
+				_, err := gdnr.Create(garden.ContainerSpec{Handle: "bob"})
+				Expect(err).To(MatchError("no netns"))
+				Expect(containerizer.CreateCallCount()).To(Equal(0))
+				Expect(networker.NetworkCallCount()).To(Equal(0))
+			})
+		})
+
 		It("should ask the networker to configure the network", func() {
 			containerizer.InfoReturns(spec.ActualContainerSpec{
 				Pid:        42,

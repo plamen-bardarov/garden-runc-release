@@ -253,6 +253,27 @@ properties:
     description: "Use containerd for container lifecycle management. NOTE: cannot be used in combination with bpm"
     default: true
 
+  garden.containerd_runtime:
+    description: |
+      containerd runtime used to run containers when garden.containerd_mode is enabled: a runtime name (e.g. io.containerd.runc.v2)
+      or an absolute path to a containerd shim binary (e.g. /opt/kata/bin/containerd-shim-kata-v2). Empty means io.containerd.runc.v2.
+    default: ""
+
+  garden.containerd_vm_runtime:
+    description: |
+      EXPERIMENTAL. Set to true when garden.containerd_runtime is VM based (e.g. Kata Containers). Container processes then run in
+      guest VMs: garden runs all processes through containerd, sets up the container network before the VM boots, runs peas
+      (e.g. envoy, health checks) inside the VM of their container and streams files through tar inside the guest.
+      The runtime itself (shim, hypervisor, guest kernel/image and configuration) must be provided separately.
+    default: false
+
+  garden.containerd_vm_memory_overhead_mb:
+    description: |
+      EXPERIMENTAL. Only used with garden.containerd_vm_runtime. Memory in MB added to the host cgroup memory limit of every
+      container to account for the VM overhead (guest kernel, agent, hypervisor, virtiofsd). The application limit is enforced
+      inside the guest. Should be at least the runtime's default guest memory plus the hypervisor overhead.
+    default: 0
+
   garden.tcp_keepalive_time:
     description: Sets the `net.ipv4.tcp_keepalive_time` kernel parameter in containers. If not specified, the value from the linux init_net namespace is used.
 

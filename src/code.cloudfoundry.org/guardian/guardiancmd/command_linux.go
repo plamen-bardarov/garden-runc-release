@@ -32,6 +32,7 @@ import (
 	"code.cloudfoundry.org/guardian/rundmc/signals"
 	"code.cloudfoundry.org/guardian/rundmc/sysctl"
 	"code.cloudfoundry.org/guardian/rundmc/users"
+	"code.cloudfoundry.org/guardian/rundmc/vmnetns"
 	"code.cloudfoundry.org/guardian/sysinfo"
 	"code.cloudfoundry.org/guardian/throttle"
 	"code.cloudfoundry.org/lager/v3"
@@ -46,6 +47,21 @@ import (
 )
 
 const containerdNamespace = "garden"
+
+func newVMNetworkNamespacePreparer(dir string) gardener.NetworkNamespacePreparer {
+	return vmnetns.New(dir)
+}
+
+// vmTarBindMount bind mounts garden's static tar binary into containers of VM
+// runtimes, where it is used to implement StreamIn/StreamOut inside the guest.
+func vmTarBindMount(tarPathOnHost string) specs.Mount {
+	return specs.Mount{
+		Type:        "bind",
+		Source:      tarPathOnHost,
+		Destination: runcontainerd.VMTarPathInContainer,
+		Options:     []string{"bind"},
+	}
+}
 
 type LinuxFactory struct {
 	config           *CommonCommand
@@ -140,7 +156,13 @@ func (f *LinuxFactory) WireResolvConfigurer() kawasaki.DnsResolvConfigurer {
 }
 
 func (f *LinuxFactory) WireContainerd(processBuilder *processes.ProcBuilder, userLookupper users.UserLookupper, wireExecer func(pidGetter runrunc.PidGetter) *runrunc.Execer, statser runcontainerd.Statser, log lager.Logger, volumizer peas.Volumizer, peaHandlesGetter runcontainerd.PeaHandlesGetter, metricsProvider *metrics.MetricsProvider) (*runcontainerd.RunContainerd, *runcontainerd.RunContainerPea, *runcontainerd.PidGetter, *privchecker.PrivilegeChecker, peas.BundleLoader, error) {
-	containerdClient, err := client.New(f.config.Containerd.Socket, client.WithDefaultRuntime(plugins.RuntimeRuncV2))
+	runtime := plugins.RuntimeRuncV2
+	if f.config.Containerd.Runtime != "" {
+		runtime = f.config.Containerd.Runtime
+	}
+	vmRuntime := f.config.Containerd.VMRuntime
+
+	containerdClient, err := client.New(f.config.Containerd.Socket, client.WithDefaultRuntime(runtime))
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
@@ -152,7 +174,19 @@ func (f *LinuxFactory) WireContainerd(processBuilder *processes.ProcBuilder, use
 
 	cgroupManager := runcontainerd.NewCgroupManager(containerdRuncRoot(), containerdNamespace)
 
+	if vmRuntime {
+		log.Info("using-vm-runtime", lager.Data{"runtime": runtime, "memory-overhead-mb": f.config.Containerd.VMMemoryOverheadMB})
+		nerd.SetVMRuntime(true)
+		// #nosec G115 - overhead is configured in MB and will not overflow int64
+		cgroupManager = runcontainerd.NewVMCgroupManager(containerdRuncRoot(), containerdNamespace, int64(f.config.Containerd.VMMemoryOverheadMB)*1024*1024)
+		statser = nerd
+	}
+
 	containerdManager := runcontainerd.New(nerd, nerd, processBuilder, userLookupper, wireExecer(pidGetter), statser, f.config.Containerd.UseContainerdForProcesses, cgroupManager, f.WireMkdirer(), peaHandlesGetter, f.config.Containers.CleanupProcessDirsOnWait, nerdStopper)
+
+	if vmRuntime {
+		containerdManager.EnableVMRuntime(runcontainerd.VMRuntimeConfig{TarPathInContainer: runcontainerd.VMTarPathInContainer}, nerd)
+	}
 
 	peaRunner := runcontainerd.NewRunContainerPea(containerdManager, nerd, volumizer, f.config.Containers.CleanupProcessDirsOnWait)
 

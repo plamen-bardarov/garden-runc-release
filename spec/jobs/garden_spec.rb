@@ -287,6 +287,48 @@ describe 'garden' do
           expect(rendered_template['server']['enable-container-network-metrics']).to eql(true)
         end
       end
+
+      context 'containerd runtime' do
+        it 'does not set a runtime or VM runtime by default' do
+          expect(rendered_template['server']['containerd-runtime']).to be_nil
+          expect(rendered_template['server']['containerd-vm-runtime']).to be_nil
+          expect(rendered_template['server']['use-containerd-for-processes']).to be_nil
+        end
+
+        context 'when a VM runtime is configured' do
+          let(:properties) {
+            {
+              'garden' => {
+                'containerd_runtime' => '/opt/kata/bin/containerd-shim-kata-v2',
+                'containerd_vm_runtime' => true,
+                'containerd_vm_memory_overhead_mb' => 640,
+              }
+            }
+          }
+
+          it 'configures the runtime, VM mode, the memory overhead and containerd processes' do
+            expect(rendered_template['server']['containerd-runtime']).to eql('/opt/kata/bin/containerd-shim-kata-v2')
+            expect(rendered_template['server']['containerd-vm-runtime']).to eql(true)
+            expect(rendered_template['server']['use-containerd-for-processes']).to eql(true)
+            expect(rendered_template['server']['containerd-vm-memory-overhead-mb']).to eql(640)
+          end
+        end
+
+        context 'when a VM runtime is configured without containerd mode' do
+          let(:properties) {
+            {
+              'garden' => {
+                'containerd_mode' => false,
+                'containerd_vm_runtime' => true,
+              }
+            }
+          }
+
+          it 'fails to render' do
+            expect { rendered_template }.to raise_error(/garden.containerd_vm_runtime requires garden.containerd_mode/)
+          end
+        end
+      end
     end
 
     context 'with a listen address' do

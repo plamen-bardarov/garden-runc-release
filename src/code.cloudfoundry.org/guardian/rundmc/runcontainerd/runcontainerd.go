@@ -91,6 +91,8 @@ type RunContainerd struct {
 	peaHandlesGetter          PeaHandlesGetter
 	cleanupProcessDirsOnWait  bool
 	runtimeStopper            RuntimeStopper
+	vmRuntime                 *VMRuntimeConfig
+	vmTaskManager             VMTaskManager
 }
 
 func New(containerManager ContainerManager,
@@ -124,6 +126,9 @@ func New(containerManager ContainerManager,
 func (r *RunContainerd) Create(log lager.Logger, id string, bundle goci.Bndl, pio garden.ProcessIO) error {
 	log.Debug("Annotations before update", lager.Data{"id": id, "Annotations": bundle.Spec.Annotations})
 	updateAnnotationsIfNeeded(&bundle)
+	if r.isVMRuntime() {
+		addSandboxAnnotations(&bundle, id)
+	}
 	log.Debug("Annotations after update", lager.Data{"id": id, "Annotations": bundle.Spec.Annotations})
 
 	err := r.cgroupManager.SetUnifiedResources(bundle)
@@ -175,12 +180,18 @@ func (r *RunContainerd) Exec(log lager.Logger, containerID string, gardenProcess
 		return nil, err
 	}
 
-	resolvedUser, err := r.userLookupper.Lookup(fmt.Sprintf("/proc/%d/root", containerPid), gardenProcessSpec.User)
+	rootfsPath := filepath.Join("/proc", strconv.FormatInt(int64(containerPid), 10), "root")
+	if r.isVMRuntime() {
+		// The container PID of a VM runtime is the hypervisor process on the
+		// host, so /proc/<pid>/root is the host root. Use the container
+		// rootfs on the host instead, which the runtime shares with the guest.
+		rootfsPath = bundle.Spec.Root.Path
+	}
+
+	resolvedUser, err := r.userLookupper.Lookup(rootfsPath, gardenProcessSpec.User)
 	if err != nil {
 		return nil, err
 	}
-
-	rootfsPath := filepath.Join("/proc", strconv.FormatInt(int64(containerPid), 10), "root")
 
 	hostUID := idmapper.MappingList(bundle.Spec.Linux.UIDMappings).Map(resolvedUser.Uid)
 	hostGID := idmapper.MappingList(bundle.Spec.Linux.GIDMappings).Map(resolvedUser.Gid)

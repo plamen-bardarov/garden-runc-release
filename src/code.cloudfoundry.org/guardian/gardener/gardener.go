@@ -79,6 +79,22 @@ type Networker interface {
 	Restore(log lager.Logger, handle string) error
 }
 
+// NetworkNamespacePreparer creates a container's network namespace before the
+// container itself is created. This is required by VM based runtimes (e.g.
+// Kata Containers) which inspect the network namespace only once, when the
+// VM boots, and therefore cannot be networked after the container has been
+// started.
+type NetworkNamespacePreparer interface {
+	// Prepare creates a new network namespace for the given handle. It returns
+	// the PID of a process inside that namespace (to be passed to the
+	// Networker), a stable path to the namespace (to be used in the OCI spec)
+	// and a function that must be called once the container has been created.
+	Prepare(log lager.Logger, handle string) (pid int, nsPath string, done func(), err error)
+	// Release releases the stable namespace path of the given handle. It must
+	// be idempotent.
+	Release(log lager.Logger, handle string) error
+}
+
 type Volumizer interface {
 	Create(log lager.Logger, spec garden.ContainerSpec) (specs.Spec, error)
 	VolumeDestroyMetricsGC
@@ -178,6 +194,10 @@ type Gardener struct {
 	AllowPrivilgedContainers bool
 
 	ContainerNetworkMetricsProvider ContainerNetworkMetricsProvider
+
+	// NetworkNamespacePreparer is optional. When set, the container network is
+	// set up before the container is created (see NetworkNamespacePreparer).
+	NetworkNamespacePreparer NetworkNamespacePreparer
 }
 
 func New(
@@ -301,6 +321,21 @@ func (g *Gardener) Create(containerSpec garden.ContainerSpec) (ctr garden.Contai
 		BaseConfig: runtimeSpec,
 	}
 
+	if g.NetworkNamespacePreparer != nil {
+		netnsHolderPid, netnsPath, netnsDone, err := g.NetworkNamespacePreparer.Prepare(log, containerSpec.Handle)
+		if err != nil {
+			log.Error("preparing-network-namespace", err)
+			return nil, err
+		}
+		defer netnsDone()
+
+		if err = g.Networker.Network(log, containerSpec, netnsHolderPid); err != nil {
+			return nil, err
+		}
+
+		desiredSpec.Namespaces = map[string]string{"network": netnsPath}
+	}
+
 	if err := g.Containerizer.Create(log, desiredSpec); err != nil {
 		return nil, err
 	}
@@ -316,8 +351,10 @@ func (g *Gardener) Create(containerSpec garden.ContainerSpec) (ctr garden.Contai
 		return nil, err
 	}
 
-	if err = g.Networker.Network(log, containerSpec, actualSpec.Pid); err != nil {
-		return nil, err
+	if g.NetworkNamespacePreparer == nil {
+		if err = g.Networker.Network(log, containerSpec, actualSpec.Pid); err != nil {
+			return nil, err
+		}
 	}
 
 	if containerSpec.GraceTime != 0 {
@@ -372,6 +409,10 @@ func (g *Gardener) destroy(log lager.Logger, handle string) error {
 	var errs *multierror.Error
 
 	errs = multierror.Append(errs, g.Containerizer.Destroy(log, handle))
+
+	if g.NetworkNamespacePreparer != nil {
+		errs = multierror.Append(errs, g.NetworkNamespacePreparer.Release(log, handle))
+	}
 
 	errs = multierror.Append(errs, g.Networker.Destroy(log, handle))
 

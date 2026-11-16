@@ -32,6 +32,9 @@ type Nerd struct {
 	context   context.Context
 	ioFifoDir string
 	mp        *metrics.MetricsProvider
+	// vmRuntime is true when containers are run by a VM based runtime (e.g.
+	// Kata Containers). Such runtimes do not understand runc task options.
+	vmRuntime bool
 }
 
 func New(client *client.Client, context context.Context, ioFifoDir string, mp *metrics.MetricsProvider) *Nerd {
@@ -41,6 +44,11 @@ func New(client *client.Client, context context.Context, ioFifoDir string, mp *m
 		ioFifoDir: ioFifoDir,
 		mp:        mp,
 	}
+}
+
+// SetVMRuntime configures the Nerd for a VM based runtime.
+func (n *Nerd) SetVMRuntime(vmRuntime bool) {
+	n.vmRuntime = vmRuntime
 }
 
 func (n *Nerd) Create(log lager.Logger, containerID string, spec *specs.Spec, hostUID, hostGID uint32, pio func() (io.Reader, io.Writer, io.Writer)) error {
@@ -58,7 +66,13 @@ func (n *Nerd) Create(log lager.Logger, containerID string, spec *specs.Spec, ho
 	}
 
 	log.Debug("creating-task", lager.Data{"containerID": containerID})
-	task, err := container.NewTask(n.context, cio.NewCreator(withProcessIO(noTTYProcessIO(pio), n.ioFifoDir)), client.WithNoNewKeyring, WithUIDAndGID(hostUID, hostGID))
+	taskOpts := []client.NewTaskOpts{client.WithNoNewKeyring, WithUIDAndGID(hostUID, hostGID)}
+	if n.vmRuntime {
+		// runc specific options (keyring, FIFO ownership) are rejected by
+		// containerd for non-runc runtimes; the VM runtime shim owns the IO.
+		taskOpts = nil
+	}
+	task, err := container.NewTask(n.context, cio.NewCreator(withProcessIO(noTTYProcessIO(pio), n.ioFifoDir)), taskOpts...)
 	if err != nil {
 		return err
 	}

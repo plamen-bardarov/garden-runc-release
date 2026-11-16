@@ -76,6 +76,15 @@ type NstarRunner interface {
 	StreamOut(log lager.Logger, pid int, path string, user string) (io.ReadCloser, error)
 }
 
+// HandleStreamer streams files in and out of a container identified by its
+// handle. It is used instead of the NstarRunner for runtimes (e.g. VM based
+// runtimes such as Kata Containers) where the container processes do not run
+// in host namespaces and therefore cannot be reached via their host PID.
+type HandleStreamer interface {
+	StreamIn(log lager.Logger, handle string, spec garden.StreamInSpec) error
+	StreamOut(log lager.Logger, handle string, spec garden.StreamOutSpec) (io.ReadCloser, error)
+}
+
 type ProcessesStopper interface {
 	StopAll(log lager.Logger, cgroupName string, save []int, kill bool) error
 }
@@ -118,6 +127,13 @@ type Containerizer struct {
 	cpuEntitlementPerShare float64
 	runtimeStopper         RuntimeStopper
 	cpuCgrouper            CPUCgrouper
+	handleStreamer         HandleStreamer
+}
+
+// SetHandleStreamer makes the containerizer use the given streamer for
+// StreamIn/StreamOut instead of nstar.
+func (c *Containerizer) SetHandleStreamer(streamer HandleStreamer) {
+	c.handleStreamer = streamer
 }
 
 func New(
@@ -250,6 +266,14 @@ func (c *Containerizer) StreamIn(log lager.Logger, handle string, spec garden.St
 		_ = metrics.SendValue("StreamInDuration", float64(time.Since(startedAt).Nanoseconds()), "nanos")
 	}(time.Now())
 
+	if c.handleStreamer != nil {
+		if err := c.handleStreamer.StreamIn(log, handle, spec); err != nil {
+			log.Error("handle-streamer-failed", err)
+			return fmt.Errorf("stream-in: %s", err)
+		}
+		return nil
+	}
+
 	state, err := c.runtime.State(log, handle)
 	if err != nil {
 		log.Error("check-pid-failed", err)
@@ -270,6 +294,15 @@ func (c *Containerizer) StreamOut(log lager.Logger, handle string, spec garden.S
 
 	log.Info("started")
 	defer log.Info("finished")
+
+	if c.handleStreamer != nil {
+		stream, err := c.handleStreamer.StreamOut(log, handle, spec)
+		if err != nil {
+			log.Error("handle-streamer-failed", err)
+			return nil, fmt.Errorf("stream-out: %s", err)
+		}
+		return stream, nil
+	}
 
 	state, err := c.runtime.State(log, handle)
 	if err != nil {

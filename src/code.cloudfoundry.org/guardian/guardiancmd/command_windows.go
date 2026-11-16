@@ -27,6 +27,15 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
+// VM runtimes (e.g. Kata Containers) are not supported on Windows.
+func newVMNetworkNamespacePreparer(dir string) gardener.NetworkNamespacePreparer {
+	return nil
+}
+
+func vmTarBindMount(tarPathOnHost string) specs.Mount {
+	return specs.Mount{}
+}
+
 type WindowsFactory struct {
 	config        *CommonCommand
 	commandRunner commandrunner.CommandRunner

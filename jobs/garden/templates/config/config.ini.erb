@@ -252,4 +252,14 @@ parse_ip(p('garden.network_pool'), 'garden.network_pool')
 <% if p("garden.containerd_mode") -%>
 ; containerd
   containerd-socket = /var/vcap/sys/run/containerd/containerd.sock
+<% unless p("garden.containerd_runtime").empty? -%>
+  containerd-runtime = <%= p("garden.containerd_runtime") %>
+<% end -%>
+<% if p("garden.containerd_vm_runtime") -%>
+  containerd-vm-runtime = true
+  use-containerd-for-processes = true
+  containerd-vm-memory-overhead-mb = <%= p("garden.containerd_vm_memory_overhead_mb") %>
+<% end -%>
+<% elsif p("garden.containerd_vm_runtime") -%>
+<% raise "garden.containerd_vm_runtime requires garden.containerd_mode" -%>
 <% end -%>
