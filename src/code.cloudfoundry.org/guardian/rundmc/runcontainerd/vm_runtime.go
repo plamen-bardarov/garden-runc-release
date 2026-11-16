@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"code.cloudfoundry.org/garden"
@@ -123,22 +124,87 @@ func (r *RunContainerd) StopAll(log lager.Logger, handle string, _ []int, kill b
 // bind-mounted tar binary inside the guest as the requested user. This
 // replaces nstar, which would otherwise enter the mount namespace of the
 // container's host PID - the hypervisor process - and write to the host.
+//
+// The stream is not passed through the process stdin: the Kata shim's CloseIO
+// waits for EOF on stdin while holding the shim lock, and EOF on the stdin
+// FIFO is not reliably delivered, which deadlocks the whole sandbox. Instead
+// the archive is written to a temporary file at the root of the container
+// rootfs on the host, which the runtime shares with the guest.
 func (r *RunContainerd) StreamIn(log lager.Logger, handle string, spec garden.StreamInSpec) error {
 	log = log.Session("vm-stream-in", lager.Data{"handle": handle, "path": spec.Path})
 
-	user, dest, err := r.prepareStreamDestination(log, handle, spec.User, spec.Path, true)
+	target, err := r.prepareStreamTarget(log, handle, spec.User, spec.Path, true)
 	if err != nil {
 		return err
 	}
 
+	archive, err := target.createArchiveFile()
+	if err != nil {
+		return err
+	}
+	defer archive.remove(log)
+
+	if _, err := io.Copy(archive.file, spec.TarStream); err != nil {
+		_ = archive.file.Close()
+		return fmt.Errorf("writing archive: %w", err)
+	}
+	if err := archive.file.Close(); err != nil {
+		return fmt.Errorf("closing archive: %w", err)
+	}
+
+	return r.runTar(log, handle, target.user, "stream-in",
+		"--no-same-permissions", "--no-same-owner", "-xf", archive.pathInContainer, "-C", target.path)
+}
+
+// StreamOut creates a tar archive of a path inside a container by running
+// garden's bind-mounted tar binary inside the guest, writing to a temporary
+// file in the container rootfs which is then streamed from the host (see
+// StreamIn for why stdio is avoided).
+func (r *RunContainerd) StreamOut(log lager.Logger, handle string, spec garden.StreamOutSpec) (io.ReadCloser, error) {
+	log = log.Session("vm-stream-out", lager.Data{"handle": handle, "path": spec.Path})
+
+	target, err := r.prepareStreamTarget(log, handle, spec.User, spec.Path, false)
+	if err != nil {
+		return nil, err
+	}
+
+	sourceDir := filepath.Dir(target.path)
+	compress := filepath.Base(target.path)
+	if spec.Path != "" && spec.Path[len(spec.Path)-1] == '/' {
+		sourceDir = target.path
+		compress = "."
+	}
+
+	archive, err := target.createArchiveFile()
+	if err != nil {
+		return nil, err
+	}
+	_ = archive.file.Close()
+
+	if err := r.runTar(log, handle, target.user, "stream-out",
+		"--no-same-permissions", "--no-same-owner", "-cf", archive.pathInContainer, "-C", sourceDir, compress); err != nil {
+		archive.remove(log)
+		return nil, err
+	}
+
+	f, err := os.Open(archive.hostPath)
+	if err != nil {
+		archive.remove(log)
+		return nil, fmt.Errorf("opening archive: %w", err)
+	}
+
+	return &removeOnClose{File: f, remove: func() { archive.remove(log) }}, nil
+}
+
+func (r *RunContainerd) runTar(log lager.Logger, handle, user, prefix string, args ...string) error {
 	var output bytes.Buffer
 	proc, err := r.Exec(log, handle, garden.ProcessSpec{
-		ID:   streamProcessID("stream-in"),
+		ID:   streamProcessID(prefix),
 		Path: r.vmRuntime.TarPathInContainer,
-		Args: []string{"--no-same-permissions", "--no-same-owner", "-xf", "-", "-C", dest},
+		Args: args,
 		User: user,
 		Dir:  "/",
-	}, garden.ProcessIO{Stdin: spec.TarStream, Stdout: &output, Stderr: &output})
+	}, garden.ProcessIO{Stdout: &output, Stderr: &output})
 	if err != nil {
 		return fmt.Errorf("starting tar: %w", err)
 	}
@@ -150,88 +216,94 @@ func (r *RunContainerd) StreamIn(log lager.Logger, handle string, spec garden.St
 	if exitCode != 0 {
 		return fmt.Errorf("tar exited with %d: %s", exitCode, output.String())
 	}
-
 	return nil
 }
 
-// StreamOut creates a tar stream of a path inside a container by running
-// garden's bind-mounted tar binary inside the guest.
-func (r *RunContainerd) StreamOut(log lager.Logger, handle string, spec garden.StreamOutSpec) (io.ReadCloser, error) {
-	log = log.Session("vm-stream-out", lager.Data{"handle": handle, "path": spec.Path})
-
-	user, source, err := r.prepareStreamDestination(log, handle, spec.User, spec.Path, false)
-	if err != nil {
-		return nil, err
-	}
-
-	sourceDir := filepath.Dir(source)
-	compress := filepath.Base(source)
-	if spec.Path != "" && spec.Path[len(spec.Path)-1] == '/' {
-		sourceDir = source
-		compress = "."
-	}
-
-	reader, writer := io.Pipe()
-	var stderr bytes.Buffer
-	proc, err := r.Exec(log, handle, garden.ProcessSpec{
-		ID:   streamProcessID("stream-out"),
-		Path: r.vmRuntime.TarPathInContainer,
-		Args: []string{"--no-same-permissions", "--no-same-owner", "-cf", "-", "-C", sourceDir, compress},
-		User: user,
-		Dir:  "/",
-	}, garden.ProcessIO{Stdout: writer, Stderr: &stderr})
-	if err != nil {
-		_ = writer.Close()
-		return nil, fmt.Errorf("starting tar: %w", err)
-	}
-
-	go func() {
-		exitCode, err := proc.Wait()
-		if err == nil && exitCode != 0 {
-			err = fmt.Errorf("tar exited with %d: %s", exitCode, stderr.String())
-		}
-		if err != nil {
-			log.Error("tar-failed", err)
-		}
-		_ = writer.CloseWithError(err)
-	}()
-
-	return reader, nil
+type streamTarget struct {
+	user       string
+	path       string
+	rootfsPath string
+	hostUID    int
+	hostGID    int
 }
 
-// prepareStreamDestination resolves the streaming user and path (relative
-// paths are relative to the user's home, as with nstar) using the container
-// rootfs on the host, and optionally creates the destination directory owned
-// by that user.
-func (r *RunContainerd) prepareStreamDestination(log lager.Logger, handle, user, path string, create bool) (string, string, error) {
+type streamArchive struct {
+	file            *os.File
+	hostPath        string
+	pathInContainer string
+}
+
+// createArchiveFile creates an empty archive file at the root of the
+// container rootfs on the host, owned by the streaming user. O_EXCL and
+// O_NOFOLLOW make sure no existing file or symlink is followed.
+func (t streamTarget) createArchiveFile() (*streamArchive, error) {
+	name := "." + streamProcessID("garden-stream") + ".tar"
+	hostPath := filepath.Join(t.rootfsPath, name)
+
+	f, err := os.OpenFile(hostPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollow, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("creating archive file: %w", err)
+	}
+	if err := f.Chown(t.hostUID, t.hostGID); err != nil {
+		_ = f.Close()
+		_ = os.Remove(hostPath)
+		return nil, fmt.Errorf("chowning archive file: %w", err)
+	}
+
+	return &streamArchive{file: f, hostPath: hostPath, pathInContainer: "/" + name}, nil
+}
+
+func (a *streamArchive) remove(log lager.Logger) {
+	if err := os.Remove(a.hostPath); err != nil && !os.IsNotExist(err) {
+		log.Error("removing-archive-file", err, lager.Data{"path": a.hostPath})
+	}
+}
+
+type removeOnClose struct {
+	*os.File
+	remove func()
+}
+
+func (r *removeOnClose) Close() error {
+	err := r.File.Close()
+	r.remove()
+	return err
+}
+
+// prepareStreamTarget resolves the streaming user and path (relative paths
+// are relative to the user's home, as with nstar) using the container rootfs
+// on the host, and optionally creates the destination directory owned by
+// that user.
+func (r *RunContainerd) prepareStreamTarget(log lager.Logger, handle, user, path string, create bool) (streamTarget, error) {
 	if user == "" {
 		user = "root"
 	}
 
 	bundle, err := r.getBundle(log, handle)
 	if err != nil {
-		return "", "", err
+		return streamTarget{}, err
 	}
 	rootfsPath := bundle.Spec.Root.Path
 
 	execUser, err := r.userLookupper.Lookup(rootfsPath, user)
 	if err != nil {
-		return "", "", fmt.Errorf("looking up user %s: %w", user, err)
+		return streamTarget{}, fmt.Errorf("looking up user %s: %w", user, err)
 	}
 
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(execUser.Home, path)
 	}
 
+	hostUID := idmapper.MappingList(bundle.Spec.Linux.UIDMappings).Map(execUser.Uid)
+	hostGID := idmapper.MappingList(bundle.Spec.Linux.GIDMappings).Map(execUser.Gid)
+
 	if create {
-		hostUID := idmapper.MappingList(bundle.Spec.Linux.UIDMappings).Map(execUser.Uid)
-		hostGID := idmapper.MappingList(bundle.Spec.Linux.GIDMappings).Map(execUser.Gid)
 		if err := r.mkdirer.MkdirAs(rootfsPath, hostUID, hostGID, 0755, false, path); err != nil {
-			return "", "", fmt.Errorf("creating %s: %w", path, err)
+			return streamTarget{}, fmt.Errorf("creating %s: %w", path, err)
 		}
 	}
 
-	return user, path, nil
+	return streamTarget{user: user, path: path, rootfsPath: rootfsPath, hostUID: hostUID, hostGID: hostGID}, nil
 }
 
 func streamProcessID(prefix string) string {

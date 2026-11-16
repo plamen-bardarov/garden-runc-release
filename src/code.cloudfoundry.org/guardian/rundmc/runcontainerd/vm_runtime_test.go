@@ -2,6 +2,10 @@ package runcontainerd_test
 
 import (
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/guardian/rundmc/goci"
@@ -157,29 +161,78 @@ var _ = Describe("Runcontainerd with a VM runtime", func() {
 			Expect(containerManager.ExecCallCount()).To(Equal(0))
 		})
 
-		It("creates the destination as the user and runs the bind mounted tar inside the container", func() {
-			containerManager.SpecReturns(&specs.Spec{
-				Root:  &specs.Root{Path: "/rootfs"},
-				Linux: &specs.Linux{},
-			}, nil)
-			userLookupper.LookupReturns(&users.ExecUser{Uid: 2000, Gid: 2000, Home: "/home/vcap"}, nil)
-			processBuilder.BuildProcessStub = func(_ goci.Bndl, spec garden.ProcessSpec, _ *users.ExecUser) *specs.Process {
-				return &specs.Process{Args: append([]string{spec.Path}, spec.Args...)}
-			}
-			backing := new(runcontainerdfakes.FakeBackingProcess)
-			backing.WaitReturns(0, nil)
-			containerManager.ExecReturns(backing, nil)
+		Context("with a container rootfs", func() {
+			var (
+				rootfs      string
+				archiveSeen []byte
+				execIO      func() (io.Reader, io.Writer, io.Writer, bool)
+			)
 
-			Expect(runContainerd.StreamIn(log, "app-handle", garden.StreamInSpec{Path: "app", User: "vcap"})).To(Succeed())
+			BeforeEach(func() {
+				rootfs = GinkgoT().TempDir()
+				containerManager.SpecReturns(&specs.Spec{Root: &specs.Root{Path: rootfs}, Linux: &specs.Linux{}}, nil)
+				userLookupper.LookupReturns(&users.ExecUser{Uid: os.Getuid(), Gid: os.Getgid(), Home: "/home/vcap"}, nil)
+				processBuilder.BuildProcessStub = func(_ goci.Bndl, spec garden.ProcessSpec, _ *users.ExecUser) *specs.Process {
+					return &specs.Process{Args: append([]string{spec.Path}, spec.Args...)}
+				}
+				containerManager.ExecStub = func(_ lager.Logger, _, _ string, process *specs.Process, pio func() (io.Reader, io.Writer, io.Writer, bool)) (runcontainerd.BackingProcess, error) {
+					execIO = pio
+					// the guest would run tar on the shared archive file
+					for i, arg := range process.Args {
+						if (arg == "-xf" || arg == "-cf") && i+1 < len(process.Args) {
+							archive := filepath.Join(rootfs, process.Args[i+1])
+							if arg == "-xf" {
+								archiveSeen, _ = os.ReadFile(archive)
+							} else {
+								Expect(os.WriteFile(archive, []byte("tar-out"), 0600)).To(Succeed())
+							}
+						}
+					}
+					backing := new(runcontainerdfakes.FakeBackingProcess)
+					backing.WaitReturns(0, nil)
+					return backing, nil
+				}
+			})
 
-			rootfs, uid, gid, _, _, paths := mkdirer.MkdirAsArgsForCall(0)
-			Expect(rootfs).To(Equal("/rootfs"))
-			Expect(uid).To(Equal(2000))
-			Expect(gid).To(Equal(2000))
-			Expect(paths).To(Equal([]string{"/home/vcap/app"}))
+			It("writes the stream to an archive file in the rootfs, extracts it with the bind mounted tar without stdin and removes it", func() {
+				Expect(runContainerd.StreamIn(log, "app-handle", garden.StreamInSpec{Path: "app", User: "vcap", TarStream: strings.NewReader("tar-in")})).To(Succeed())
 
-			_, _, _, process, _ := containerManager.ExecArgsForCall(0)
-			Expect(process.Args).To(Equal([]string{"/tmp/garden-tar", "--no-same-permissions", "--no-same-owner", "-xf", "-", "-C", "/home/vcap/app"}))
+				mkdirRootfs, _, _, _, _, paths := mkdirer.MkdirAsArgsForCall(0)
+				Expect(mkdirRootfs).To(Equal(rootfs))
+				Expect(paths).To(Equal([]string{"/home/vcap/app"}))
+
+				_, _, _, process, _ := containerManager.ExecArgsForCall(0)
+				Expect(process.Args[0]).To(Equal("/tmp/garden-tar"))
+				Expect(process.Args[1:4]).To(Equal([]string{"--no-same-permissions", "--no-same-owner", "-xf"}))
+				Expect(process.Args[4]).To(MatchRegexp(`^/\.garden-stream-.*\.tar$`))
+				Expect(process.Args[5:]).To(Equal([]string{"-C", "/home/vcap/app"}))
+				Expect(string(archiveSeen)).To(Equal("tar-in"))
+
+				stdin, _, _, _ := execIO()
+				Expect(stdin).To(BeNil())
+
+				entries, err := os.ReadDir(rootfs)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(entries).To(BeEmpty())
+			})
+
+			It("creates the archive in the guest and streams it from the rootfs, removing it on close", func() {
+				stream, err := runContainerd.StreamOut(log, "app-handle", garden.StreamOutSpec{Path: "/home/vcap/app/", User: "vcap"})
+				Expect(err).NotTo(HaveOccurred())
+
+				_, _, _, process, _ := containerManager.ExecArgsForCall(0)
+				Expect(process.Args[3]).To(Equal("-cf"))
+				Expect(process.Args[5:]).To(Equal([]string{"-C", "/home/vcap/app/", "."}))
+
+				content, err := io.ReadAll(stream)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(content)).To(Equal("tar-out"))
+				Expect(stream.Close()).To(Succeed())
+
+				entries, err := os.ReadDir(rootfs)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(entries).To(BeEmpty())
+			})
 		})
 	})
 
