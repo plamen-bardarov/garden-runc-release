@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -209,4 +210,26 @@ func closeStdinWhenDone(ctx context.Context, log lager.Logger, process stdinClos
 			log.Info("closing-stdin-failed", lager.Data{"containerID": containerID, "processID": process.ID(), "error": err.Error()})
 		}
 	}()
+}
+
+const (
+	notStoppedRetries  = 50
+	notStoppedInterval = 100 * time.Millisecond
+)
+
+// retryWhileNotStopped retries deleting a task while the Kata runtime reports
+// the container as still running. The Kata shim publishes the exit of a
+// container's process (so Wait returns) before it stops the container in the
+// guest, and rejects a Delete issued in between.
+func retryWhileNotStopped(log lager.Logger, deleteTask func() error) error {
+	var err error
+	for i := 0; i < notStoppedRetries; i++ {
+		err = deleteTask()
+		if err == nil || !strings.Contains(err.Error(), "Container not ready or stopped") {
+			return err
+		}
+		log.Debug("task-not-stopped-yet-retrying-delete", lager.Data{"attempt": i + 1})
+		time.Sleep(notStoppedInterval)
+	}
+	return err
 }

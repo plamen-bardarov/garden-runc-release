@@ -144,6 +144,12 @@ func (n *Nerd) Delete(log lager.Logger, containerID string) error {
 	}
 
 	log.Debug("deleting-task", lager.Data{"containerID": containerID})
+	if n.vmRuntime {
+		return retryWhileNotStopped(log, func() error {
+			_, err := task.Delete(n.context, withProcessKillLogging(log, n.mp))
+			return err
+		})
+	}
 	_, err = task.Delete(n.context, withProcessKillLogging(log, n.mp))
 	return err
 }

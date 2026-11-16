@@ -2,6 +2,7 @@ package nerd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -60,5 +61,28 @@ func TestCloseStdinOnlyAfterStdinIsDone(t *testing.T) {
 	case <-process.closed:
 	case <-time.After(time.Second):
 		t.Fatal("stdin was not closed after EOF")
+	}
+}
+
+func TestRetryWhileNotStopped(t *testing.T) {
+	calls := 0
+	err := retryWhileNotStopped(lagertest.NewTestLogger("test"), func() error {
+		calls++
+		if calls < 3 {
+			return errors.New("failed to delete task: Container not ready or stopped, impossible to delete")
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("expected success after 3 calls, got %v after %d", err, calls)
+	}
+
+	calls = 0
+	err = retryWhileNotStopped(lagertest.NewTestLogger("test"), func() error {
+		calls++
+		return errors.New("other error")
+	})
+	if err == nil || calls != 1 {
+		t.Fatalf("expected other errors not to be retried, got %v after %d", err, calls)
 	}
 }
