@@ -3,6 +3,7 @@ package nerd_test
 import (
 	"context"
 	"errors"
+	"github.com/containerd/errdefs"
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
@@ -68,6 +69,22 @@ var _ = Describe("BackingProcess", func() {
 			It("does not wait for the IO (because it does not make sense)", func() {
 				Expect(containerdIO.WaitCallCount()).To(BeZero())
 			})
+		})
+	})
+	Describe("Delete", func() {
+		It("treats a task that no longer exists as deleted", func() {
+			containerdProcess.DeleteReturns(nil, errdefs.ErrNotFound)
+			Expect(backingProcess.Delete()).To(Succeed())
+		})
+
+		It("treats a container already removed from its Kata sandbox as deleted", func() {
+			containerdProcess.DeleteReturns(nil, errors.New("failed to delete task: do delete: failed to find container sandbox-envoy"))
+			Expect(backingProcess.Delete()).To(Succeed())
+		})
+
+		It("returns other errors", func() {
+			containerdProcess.DeleteReturns(nil, errors.New("boom"))
+			Expect(backingProcess.Delete()).To(MatchError("boom"))
 		})
 	})
 })

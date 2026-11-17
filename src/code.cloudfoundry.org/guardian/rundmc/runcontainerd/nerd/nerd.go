@@ -462,7 +462,10 @@ func (n *Nerd) RemoveBundle(log lager.Logger, handle string) error {
 	container, err := n.loadContainer(log, handle)
 	if err == nil {
 		log.Debug("deleting-container", lager.Data{"containerID": handle})
-		return container.Delete(n.context)
+		if err := container.Delete(n.context); err != nil && !errdefs.IsNotFound(err) {
+			return err
+		}
+		return nil
 	}
 
 	if _, isNotFound := err.(runcontainerd.ContainerNotFoundError); isNotFound {

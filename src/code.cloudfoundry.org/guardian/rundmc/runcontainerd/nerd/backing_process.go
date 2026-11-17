@@ -2,10 +2,12 @@ package nerd
 
 import (
 	"context"
+	"strings"
 	"syscall"
 
 	"code.cloudfoundry.org/lager/v3"
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/errdefs"
 )
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
@@ -51,5 +53,15 @@ func (p BackingProcess) Signal(signal syscall.Signal) error {
 
 func (p BackingProcess) Delete() error {
 	_, err := p.containerdProcess.Delete(p.context)
+	if isAlreadyGone(err) {
+		return nil
+	}
 	return err
+}
+
+// isAlreadyGone reports whether deleting failed because the task or container
+// no longer exists. Kata runtime-rs reports containers removed together with
+// their sandbox VM as "failed to find container".
+func isAlreadyGone(err error) bool {
+	return err != nil && (errdefs.IsNotFound(err) || strings.Contains(err.Error(), "failed to find container"))
 }
