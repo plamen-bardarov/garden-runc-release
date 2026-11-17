@@ -80,6 +80,15 @@ func TestRetryWhileNotStopped(t *testing.T) {
 	calls = 0
 	err = retryWhileNotStopped(lagertest.NewTestLogger("test"), func() error {
 		calls++
+		return errors.New("failed to delete task: do delete: failed to find container sandbox-envoy")
+	})
+	if err != nil || calls != 1 {
+		t.Fatalf("expected a container already gone from the sandbox to count as deleted, got %v after %d", err, calls)
+	}
+
+	calls = 0
+	err = retryWhileNotStopped(lagertest.NewTestLogger("test"), func() error {
+		calls++
 		return errors.New("other error")
 	})
 	if err == nil || calls != 1 {

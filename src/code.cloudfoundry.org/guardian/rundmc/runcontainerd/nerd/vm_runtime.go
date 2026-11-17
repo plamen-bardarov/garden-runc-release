@@ -225,6 +225,12 @@ func retryWhileNotStopped(log lager.Logger, deleteTask func() error) error {
 	var err error
 	for i := 0; i < notStoppedRetries; i++ {
 		err = deleteTask()
+		if err != nil && strings.Contains(err.Error(), "failed to find container") {
+			// runtime-rs: the container is already gone from the sandbox (e.g.
+			// removed together with its sandbox VM)
+			log.Debug("task-already-deleted-in-sandbox", lager.Data{"error": err.Error()})
+			return nil
+		}
 		if err == nil || !strings.Contains(err.Error(), "Container not ready or stopped") {
 			return err
 		}
