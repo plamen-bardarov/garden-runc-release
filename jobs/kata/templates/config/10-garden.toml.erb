@@ -5,13 +5,18 @@
 default_vcpus = <%= Integer(p("kata.default_vcpus")) %>
 default_memory = <%= Integer(p("kata.default_memory_mb")) %>
 <%
+  cache = p("kata.virtio_fs_cache")
+  raise "kata.virtio_fs_cache must be one of never, auto, always" unless %w[never auto always].include?(cache)
   virtiofsd_args = p("kata.virtio_fs_extra_args").dup
+  virtiofsd_args << "--allow-mmap" if cache == "never" && p("kata.virtio_fs_allow_mmap")
   if p("kata.translate_rootfs_ids")
     root = Integer(p("kata.rootfs_root_host_id"))
     virtiofsd_args += ["--translate-uid", "map:0:#{root}:1", "--translate-gid", "map:0:#{root}:1"]
   end
 -%>
+virtio_fs_cache = "<%= cache %>"
 virtio_fs_extra_args = [<%= virtiofsd_args.map { |a| %Q("#{a}") }.join(", ") %>]
+reclaim_guest_freed_memory = <%= p("kata.reclaim_guest_freed_memory") %>
 enable_debug = <%= p("kata.debug") %>
 rootless = <%= p("kata.rootless") %>
 

@@ -64,6 +64,27 @@ properties:
       (e.g. --translate-uid / --translate-gid for UID translation).
     default: ["--thread-pool-size=1", "-o", "announce_submounts"]
 
+  kata.virtio_fs_cache:
+    description: |
+      Guest caching of the shared filesystem (container root filesystems): never, auto or always (Kata's virtio_fs_cache).
+      Guest RAM is shared memory on the host (required by vhost-user), so file data cached in the guest stays pinned on
+      the host and duplicates the host page cache that virtiofsd reads through. With "never" file data is cached only
+      once, in the host page cache, which is reclaimable and shared by sandboxes using the same image layers.
+      Cloud Hypervisor with runtime-rs has no DAX window for virtio-fs.
+    default: never
+
+  kata.virtio_fs_allow_mmap:
+    description: |
+      With kata.virtio_fs_cache: never, allow shared writable mmap of files (virtiofsd --allow-mmap), e.g. the JVM's
+      hsperfdata. Safe because every sandbox has exclusive access to its shared directory.
+    default: true
+
+  kata.reclaim_guest_freed_memory:
+    description: |
+      Return memory freed in the guest to the host (virtio-balloon free page reporting, Kata's reclaim_guest_freed_memory).
+      Without it, guest RAM touched once stays allocated on the host until the VM stops.
+    default: true
+
   kata.debug:
     description: Enable debug logging of the runtime, hypervisor and agent (shows up in syslog as kata[...]).
     default: false
