@@ -74,12 +74,13 @@ properties:
 
   kata.virtio_fs_cache:
     description: |
-      Guest caching of the shared filesystem (container root filesystems): never, auto or always (Kata's virtio_fs_cache).
-      Guest RAM is shared memory on the host (required by vhost-user), so file data cached in the guest stays pinned on
-      the host and duplicates the host page cache that virtiofsd reads through. With "never" file data is cached only
-      once, in the host page cache, which is reclaimable and shared by sandboxes using the same image layers.
-      Cloud Hypervisor with runtime-rs has no DAX window for virtio-fs.
-    default: never
+      Guest caching of the shared filesystem (container root filesystems): auto, never or always (Kata's virtio_fs_cache).
+      Guest RAM is shared memory on the host (required by vhost-user), so file data cached in the guest stays allocated on
+      the host and duplicates the host page cache of virtiofsd. "never" caches file data only once (host page cache,
+      reclaimable, shared by sandboxes of the same image layers): about 25% less host memory for a Java app, but every
+      read and stat becomes a round trip to virtiofsd (measured: stat 6 us -> 1 ms, Tomcat start 18 s -> 32 s). Use
+      "never" only for density-sensitive cells with little file I/O. Cloud Hypervisor with runtime-rs has no DAX window.
+    default: auto
 
   kata.virtio_fs_allow_mmap:
     description: |
