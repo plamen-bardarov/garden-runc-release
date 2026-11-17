@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tar -xzf kata/kata-clh-*-amd64.tar.gz -C "${BOSH_INSTALL_TARGET}"
+test -x "${BOSH_INSTALL_TARGET}/opt/kata/bin/cloud-hypervisor"
+test -x "${BOSH_INSTALL_TARGET}/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"

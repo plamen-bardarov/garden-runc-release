@@ -1,0 +1,67 @@
+---
+name: kata
+
+description: |
+  EXPERIMENTAL. Installs Kata Containers runtime-rs (containerd shim, Cloud Hypervisor, virtiofsd, guest
+  kernel and guest image) and prepares the host for garden's VM runtime mode. Has no processes: containerd starts the
+  Kata shim per container. Use together with the garden job properties
+    garden.containerd_mode: true
+    garden.containerd_vm_runtime: true
+    garden.containerd_runtime: /opt/kata/runtime-rs/bin/containerd-shim-kata-v2
+  The VM needs hardware virtualization (/dev/kvm), i.e. bare metal or nested virtualization.
+
+templates:
+  bin/pre-start.erb: bin/pre-start
+  config/10-garden.toml.erb: config/10-garden.toml
+
+packages:
+  - kata
+
+properties:
+  kata.enabled:
+    description: |
+      Install and configure Kata on this VM. When false the job does nothing (and removes the configuration it
+      installed earlier), so it can be colocated everywhere and switched on per instance group.
+    default: false
+
+  kata.rootless:
+    description: |
+      Run the hypervisor (VMM) as an unprivileged throwaway user per sandbox (Kata runtime-rs). The Kata
+      shim and virtiofsd still run as root. Requires /dev/kvm to be group accessible (done by pre-start).
+    default: true
+
+  kata.guest_seccomp:
+    description: |
+      Apply the container's seccomp profile inside the guest VM (Kata's disable_guest_seccomp = false).
+      Kata disables guest seccomp by default, which silently drops garden's seccomp profile.
+    default: true
+
+  kata.default_vcpus:
+    description: vCPUs of the guest VM at boot (CPU limits of the container are applied on top).
+    default: 1
+
+  kata.default_memory_mb:
+    description: |
+      Guest memory in MiB at boot. Container memory limits are hot-plugged on top. Keep
+      garden.containerd_vm_memory_overhead_mb >= this value plus the hypervisor/shim/virtiofsd overhead.
+    default: 512
+
+  kata.virtio_fs_extra_args:
+    description: |
+      Arguments passed to virtiofsd. Replaces Kata's default list, so include the defaults when extending it
+      (e.g. --translate-uid / --translate-gid for UID translation).
+    default: ["--thread-pool-size=1", "-o", "announce_submounts"]
+
+  kata.debug:
+    description: Enable debug logging of the runtime, hypervisor and agent (shows up in syslog as kata[...]).
+    default: false
+
+  kata.debug_console:
+    description: |
+      DEBUG ONLY. Start a root shell in every guest, reachable with `kata-ctl exec <sandbox-id>` (kata-tools).
+      Never enable on production cells.
+    default: false
+
+  kata.pprof:
+    description: DEBUG ONLY. Serve pprof on the shim management socket (/run/vc/sbs/<id>/shim-monitor.sock).
+    default: false

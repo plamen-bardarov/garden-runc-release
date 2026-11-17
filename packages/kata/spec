@@ -1,0 +1,7 @@
+---
+name: kata
+
+# Trimmed Kata Containers static release (Cloud Hypervisor flavour only), built by
+# scripts/kata/prepare-blob.sh from the upstream kata-static-<version>-amd64.tar.zst.
+files:
+  - kata/kata-clh-*-amd64.tar.gz
