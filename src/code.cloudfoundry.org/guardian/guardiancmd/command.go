@@ -198,6 +198,7 @@ type CommonCommand struct {
 		UseContainerdForProcesses bool   `long:"use-containerd-for-processes" description:"Use containerd to run processes in containers."`
 		Runtime                   string `long:"containerd-runtime" description:"containerd runtime used to run containers: a runtime name (e.g. io.containerd.runc.v2) or an absolute path to a shim binary (e.g. /opt/kata/bin/containerd-shim-kata-v2). Defaults to io.containerd.runc.v2."`
 		VMRuntime                 bool   `long:"containerd-vm-runtime" description:"The containerd runtime is VM based (e.g. Kata Containers): containers run in guest VMs and are not reachable through their host PID. Implies --use-containerd-for-processes."`
+		VMTranslateRootfsIDs      bool   `long:"containerd-vm-translate-rootfs-ids" description:"Use id-shifted container root filesystems (as without a VM runtime) and rely on the VM runtime's shared filesystem to translate ids, e.g. virtiofsd --translate-uid/--translate-gid map:0:<maximus>:1. Files written by container root then belong to the unprivileged maximus user on the host instead of root. Only used with --containerd-vm-runtime."`
 		VMMemoryOverheadMB        uint64 `long:"containerd-vm-memory-overhead-mb" default:"0" description:"Memory added to the host cgroup limit of each container for the VM overhead (guest kernel, agent, hypervisor). Only used with --containerd-vm-runtime."`
 		VMNetnsDir                string `long:"containerd-vm-netns-dir" default:"/run/garden-netns" description:"Directory where network namespaces of VM runtime containers are bind mounted."`
 	} `group:"Containerd"`
@@ -291,7 +292,7 @@ func (cmd *CommonCommand) createWiring(logger lager.Logger, metricsProvider *met
 	}
 
 	volumizer := factory.WireVolumizer(logger)
-	if cmd.Containerd.VMRuntime {
+	if cmd.Containerd.VMRuntime && !cmd.Containerd.VMTranslateRootfsIDs {
 		volumizer = gardener.UnshiftedRootFSVolumizer{Volumizer: volumizer}
 	}
 

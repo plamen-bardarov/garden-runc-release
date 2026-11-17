@@ -267,6 +267,14 @@ properties:
       The runtime itself (shim, hypervisor, guest kernel/image and configuration) must be provided separately.
     default: false
 
+  garden.containerd_vm_translate_rootfs_ids:
+    description: |
+      EXPERIMENTAL. Only used with garden.containerd_vm_runtime. Use id-shifted container root filesystems (as without a VM
+      runtime) and rely on the VM runtime to translate ids on its shared filesystem, so that files written by container root
+      belong to the unprivileged maximus user on the host instead of root. Requires the runtime to translate container root to
+      maximus, e.g. the kata job with kata.translate_rootfs_ids: true.
+    default: false
+
   garden.containerd_vm_memory_overhead_mb:
     description: |
       EXPERIMENTAL. Only used with garden.containerd_vm_runtime. Memory in MB added to the host cgroup memory limit of every

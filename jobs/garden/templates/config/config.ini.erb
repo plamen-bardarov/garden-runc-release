@@ -259,6 +259,9 @@ parse_ip(p('garden.network_pool'), 'garden.network_pool')
   containerd-vm-runtime = true
   use-containerd-for-processes = true
   containerd-vm-memory-overhead-mb = <%= p("garden.containerd_vm_memory_overhead_mb") %>
+<% if p("garden.containerd_vm_translate_rootfs_ids") -%>
+  containerd-vm-translate-rootfs-ids = true
+<% end -%>
 <% end -%>
 <% elsif p("garden.containerd_vm_runtime") -%>
 <% raise "garden.containerd_vm_runtime requires garden.containerd_mode" -%>

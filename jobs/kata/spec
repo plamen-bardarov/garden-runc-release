@@ -36,6 +36,18 @@ properties:
       Kata disables guest seccomp by default, which silently drops garden's seccomp profile.
     default: true
 
+  kata.translate_rootfs_ids:
+    description: |
+      Translate ids on the shared filesystem (virtiofsd --translate-uid/--translate-gid): guest root (0) is the maximus
+      user on the host (kata.rootfs_root_host_id) in both directions. Files written by container root then belong to an
+      unprivileged host user. Must be used together with garden.containerd_vm_translate_rootfs_ids: true, which makes
+      garden create id-shifted root filesystems.
+    default: false
+
+  kata.rootfs_root_host_id:
+    description: Host uid and gid of container root in id-shifted root filesystems (garden's maximus).
+    default: 4294967294
+
   kata.default_vcpus:
     description: vCPUs of the guest VM at boot (CPU limits of the container are applied on top).
     default: 1
