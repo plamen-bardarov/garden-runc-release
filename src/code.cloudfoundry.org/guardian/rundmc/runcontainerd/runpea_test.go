@@ -63,4 +63,45 @@ var _ = Describe("RunContainerPea", func() {
 			})
 		})
 	})
+	Describe("best-effort cleanup (VM runtimes)", func() {
+		var backing *runcontainerdfakes.FakeBackingProcess
+
+		BeforeEach(func() {
+			backing = new(runcontainerdfakes.FakeBackingProcess)
+			fakeProcessManager.GetTaskReturns(backing, nil)
+			runContainerPea.SetBestEffortCleanup(true)
+		})
+
+		It("cleans up the pea even when waiting for it fails (its VM is gone)", func() {
+			backing.WaitReturns(0, errors.New("ttrpc: closed"))
+			process, err := runContainerPea.RunPea(lagertest.NewTestLogger("test-logger"), "pea", goci.Bndl{}, "sandbox-id", garden.ProcessIO{}, false, strings.NewReader(""), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = process.Wait()
+			Expect(err).To(MatchError("ttrpc: closed"))
+			Expect(fakePeaManager.DeleteCallCount()).To(Equal(1))
+			Expect(fakePeaManager.RemoveBundleCallCount()).To(Equal(1))
+			Expect(fakeVolumizer.DestroyCallCount()).To(Equal(1))
+		})
+
+		It("runs all cleanup steps when one fails", func() {
+			backing.WaitReturns(137, nil)
+			fakePeaManager.DeleteReturns(errors.New("task not stoppable"))
+			process, err := runContainerPea.RunPea(lagertest.NewTestLogger("test-logger"), "pea", goci.Bndl{}, "sandbox-id", garden.ProcessIO{}, false, strings.NewReader(""), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = process.Wait()
+			Expect(err).To(MatchError(ContainSubstring("task not stoppable")))
+			Expect(fakePeaManager.RemoveBundleCallCount()).To(Equal(1))
+			Expect(fakeVolumizer.DestroyCallCount()).To(Equal(1))
+		})
+
+		It("returns the exit code when cleanup succeeds", func() {
+			backing.WaitReturns(137, nil)
+			process, err := runContainerPea.RunPea(lagertest.NewTestLogger("test-logger"), "pea", goci.Bndl{}, "sandbox-id", garden.ProcessIO{}, false, strings.NewReader(""), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(process.Wait()).To(Equal(137))
+		})
+	})
 })

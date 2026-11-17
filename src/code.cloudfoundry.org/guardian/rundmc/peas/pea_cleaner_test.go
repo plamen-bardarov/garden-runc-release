@@ -7,6 +7,7 @@ import (
 	"code.cloudfoundry.org/guardian/rundmc/peas"
 	"code.cloudfoundry.org/guardian/rundmc/peas/peasfakes"
 	"code.cloudfoundry.org/guardian/rundmc/peas/processwaiter/processwaiterfakes"
+	"code.cloudfoundry.org/lager/v3"
 	"code.cloudfoundry.org/lager/v3/lagertest"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -203,4 +204,38 @@ var _ = Describe("PeaCleaner", func() {
 			Consistently(fakeVolumizer.DestroyCallCount).Should(Equal(0))
 		})
 	})
+	Describe("CleanAll with a runtime that leaves orphaned peas behind", func() {
+		var remover *orphanRemovingRuntime
+
+		BeforeEach(func() {
+			remover = &orphanRemovingRuntime{FakeRuntime: fakeRuntime, orphans: []string{"gone-envoy", "gone-liveness-healthcheck-0"}}
+			cleaner = &peas.PeaCleaner{
+				Deleter:      fakeDeleter,
+				Volumizer:    fakeVolumizer,
+				Waiter:       fakeProcWaiter.Spy,
+				Runtime:      remover,
+				PeaPidGetter: fakePeaPidGetter,
+			}
+		})
+
+		It("removes them and destroys their volumes", func() {
+			Expect(cleaner.CleanAll(logger)).To(Succeed())
+			Expect(remover.called).To(BeTrue())
+			Expect(fakeVolumizer.DestroyCallCount()).To(Equal(2))
+			_, first := fakeVolumizer.DestroyArgsForCall(0)
+			_, second := fakeVolumizer.DestroyArgsForCall(1)
+			Expect([]string{first, second}).To(ConsistOf("gone-envoy", "gone-liveness-healthcheck-0"))
+		})
+	})
 })
+
+type orphanRemovingRuntime struct {
+	*peasfakes.FakeRuntime
+	orphans []string
+	called  bool
+}
+
+func (r *orphanRemovingRuntime) RemoveOrphanedPeas(lager.Logger) ([]string, error) {
+	r.called = true
+	return r.orphans, nil
+}

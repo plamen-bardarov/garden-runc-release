@@ -21,6 +21,13 @@ type Runtime interface {
 	ContainerPeaHandles(log lager.Logger, id string) ([]string, error)
 }
 
+// OrphanedPeaRemover is implemented by runtimes whose pea records can outlive
+// their sandbox (VM runtimes). It removes such records and returns the pea
+// handles so that their volumes can be destroyed.
+type OrphanedPeaRemover interface {
+	RemoveOrphanedPeas(log lager.Logger) ([]string, error)
+}
+
 //counterfeiter:generate . PeaPidGetter
 type PeaPidGetter interface {
 	GetPeaPid(logger lager.Logger, _, peaID string) (int, error)
@@ -63,6 +70,18 @@ func (p *PeaCleaner) CleanAll(log lager.Logger) error {
 	log = log.Session("clean-all-peas")
 	log.Info("start")
 	defer log.Info("end")
+
+	if remover, ok := p.Runtime.(OrphanedPeaRemover); ok {
+		orphans, err := remover.RemoveOrphanedPeas(log)
+		if err != nil {
+			log.Error("removing-orphaned-peas-failed", err)
+		}
+		for _, orphan := range orphans {
+			if err := p.Volumizer.Destroy(log, orphan); err != nil {
+				log.Error("destroying-orphaned-pea-volume-failed", err, lager.Data{"peaHandle": orphan})
+			}
+		}
+	}
 
 	sandboxHandles, err := p.Runtime.ContainerHandles()
 	if err != nil {

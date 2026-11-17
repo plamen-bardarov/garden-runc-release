@@ -25,6 +25,13 @@ type RunContainerPea struct {
 	processManager           ProcessManager
 	volumizer                Volumizer
 	cleanupProcessDirsOnWait bool
+	bestEffortCleanup        bool
+}
+
+// SetBestEffortCleanup makes peas run all cleanup steps after they exit, even
+// if waiting for them or a step fails (see PeaProcess). Used with VM runtimes.
+func (r *RunContainerPea) SetBestEffortCleanup(bestEffort bool) {
+	r.bestEffortCleanup = bestEffort
 }
 
 func NewRunContainerPea(peaManager PeaManager, processManager ProcessManager, volumizer Volumizer, cleanupProcessDirsOnWait bool) *RunContainerPea {
@@ -59,5 +66,7 @@ func (r *RunContainerPea) RunPea(
 	}
 
 	proc := NewProcess(log, process, r.cleanupProcessDirsOnWait)
-	return NewPeaProcess(log, *proc, r.peaManager, r.volumizer), nil
+	peaProcess := NewPeaProcess(log, *proc, r.peaManager, r.volumizer)
+	peaProcess.bestEffortCleanup = r.bestEffortCleanup
+	return peaProcess, nil
 }
