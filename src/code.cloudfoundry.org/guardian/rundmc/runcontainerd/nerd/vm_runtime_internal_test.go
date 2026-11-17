@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"code.cloudfoundry.org/lager/v3/lagertest"
+	cgroup1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	"github.com/containerd/containerd/v2/client"
 )
 
@@ -93,5 +94,37 @@ func TestRetryWhileNotStopped(t *testing.T) {
 	})
 	if err == nil || calls != 1 {
 		t.Fatalf("expected other errors not to be retried, got %v after %d", err, calls)
+	}
+}
+
+func TestStatsFromCgroup1WithRssAndCache(t *testing.T) {
+	stats := statsFromCgroup1(&cgroup1stats.Metrics{Memory: &cgroup1stats.MemoryStat{
+		TotalRSS: 100, TotalCache: 50, TotalInactiveFile: 30,
+		Usage: &cgroup1stats.MemoryEntry{Usage: 1000, Limit: 2000},
+	}})
+	if got := stats.Memory.TotalUsageTowardLimit; got != 120 {
+		t.Fatalf("expected rss + cache - inactive_file = 120, got %d", got)
+	}
+}
+
+// Metrics as sent by Kata runtime-rs for a cgroup v2 guest (taken from a cell):
+// no rss/cache, usage and inactive_file only.
+func TestStatsFromCgroup1WithoutRssAndCacheUsesTheWorkingSet(t *testing.T) {
+	stats := statsFromCgroup1(&cgroup1stats.Metrics{Memory: &cgroup1stats.MemoryStat{
+		InactiveAnon: 23425024, InactiveFile: 280363008, ActiveFile: 32768,
+		Usage: &cgroup1stats.MemoryEntry{Usage: 310906880, Limit: 320864256, Max: 310906880},
+	}})
+	if got := stats.Memory.TotalUsageTowardLimit; got != 310906880-280363008 {
+		t.Fatalf("expected usage - inactive_file = %d, got %d", 310906880-280363008, got)
+	}
+	if got := stats.Memory.HierarchicalMemoryLimit; got != 320864256 {
+		t.Fatalf("expected the limit, got %d", got)
+	}
+}
+
+func TestStatsFromCgroup1WithoutUsage(t *testing.T) {
+	stats := statsFromCgroup1(&cgroup1stats.Metrics{Memory: &cgroup1stats.MemoryStat{InactiveFile: 10}})
+	if got := stats.Memory.TotalUsageTowardLimit; got != 0 {
+		t.Fatalf("expected 0 without usage, got %d", got)
 	}
 }

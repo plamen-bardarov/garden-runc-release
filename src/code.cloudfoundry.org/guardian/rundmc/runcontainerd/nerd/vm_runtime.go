@@ -100,6 +100,26 @@ func statsFromCgroup2(m *cgroup2stats.Metrics) gardener.StatsContainerMetrics {
 	return stats
 }
 
+// memoryFromCgroup1Usage computes the memory usage from the cgroup usage when
+// the cgroup v1 metrics carry no rss/cache. Kata Containers runtime-rs sends
+// cgroup v1 metrics also for cgroup v2 guests and keeps only the memory.stat
+// keys that have a cgroup v1 name: "anon" and "file" are dropped, while the
+// usage (memory.current) and inactive_file are kept. The usage without the
+// inactive page cache is the working set, the equivalent of
+// anon + file - inactive_file that garden reports for cgroup v2.
+func memoryFromCgroup1Usage(stat garden.ContainerMemoryStat, m *cgroup1stats.MemoryStat) garden.ContainerMemoryStat {
+	inactiveFile := m.TotalInactiveFile
+	if inactiveFile == 0 {
+		inactiveFile = m.InactiveFile
+	}
+	if inactiveFile < m.Usage.Usage {
+		stat.TotalUsageTowardLimit = m.Usage.Usage - inactiveFile
+	}
+	stat.InactiveAnon = m.InactiveAnon
+	stat.HierarchicalMemoryLimit = m.Usage.Limit
+	return stat
+}
+
 func statsFromCgroup1(m *cgroup1stats.Metrics) gardener.StatsContainerMetrics {
 	stats := gardener.StatsContainerMetrics{}
 
@@ -125,6 +145,9 @@ func statsFromCgroup1(m *cgroup1stats.Metrics) gardener.StatsContainerMetrics {
 		total := m.Memory.TotalRSS + m.Memory.TotalCache
 		if m.Memory.TotalInactiveFile < total {
 			stats.Memory.TotalUsageTowardLimit = total - m.Memory.TotalInactiveFile
+		}
+		if total == 0 && m.Memory.Usage != nil {
+			stats.Memory = memoryFromCgroup1Usage(stats.Memory, m.Memory)
 		}
 	}
 
