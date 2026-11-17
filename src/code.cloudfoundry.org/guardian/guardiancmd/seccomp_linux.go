@@ -57,6 +57,7 @@ func buildSeccomp() (*specs.LinuxSeccomp, error) {
 			AllowSyscall("exit"),
 			AllowSyscall("exit_group"),
 			AllowSyscall("faccessat"),
+			AllowSyscall("faccessat2"),
 			AllowSyscall("fadvise64"),
 			AllowSyscall("fadvise64_64"),
 			AllowSyscall("fallocate"),
@@ -365,9 +366,45 @@ func buildSeccomp() (*specs.LinuxSeccomp, error) {
 					Op:       specs.OpMaskedEqual,
 				},
 			),
+			// ENOSYS makes libc fall back to older syscalls. runc returns ENOSYS
+			// for any syscall newer than the newest one named in the profile;
+			// other runtimes (e.g. the Kata Containers agent) apply the default
+			// action (EPERM) instead, which breaks libc (e.g. glibc's faccessat2
+			// based eaccess: "test -r" fails). Name the syscalls newer than
+			// openat2 that are not allowed explicitly, so both behave the same.
 			specs.LinuxSyscall{
 				Names: []string{
 					"clone3",
+					"pidfd_getfd",
+					"process_madvise",
+					"epoll_pwait2",
+					"mount_setattr",
+					"quotactl_fd",
+					"landlock_create_ruleset",
+					"landlock_add_rule",
+					"landlock_restrict_self",
+					"memfd_secret",
+					"process_mrelease",
+					"futex_waitv",
+					"set_mempolicy_home_node",
+					"cachestat",
+					"map_shadow_stack",
+					"futex_wake",
+					"futex_wait",
+					"futex_requeue",
+					"statmount",
+					"listmount",
+					"lsm_get_self_attr",
+					"lsm_set_self_attr",
+					"lsm_list_modules",
+					"mseal",
+					"setxattrat",
+					"getxattrat",
+					"listxattrat",
+					"removexattrat",
+					"open_tree_attr",
+					"file_getattr",
+					"file_setattr",
 				},
 				Action:   specs.ActErrno,
 				ErrnoRet: &nosys,
