@@ -43,7 +43,8 @@ func (m vmCgroupManager) SetUnifiedResources(bundle goci.Bndl) error {
 
 	// Only the host-side (parent) cgroup gets the overhead. The spec passed to
 	// the runtime keeps the application limit, which Kata applies to the
-	// container cgroup inside the guest and uses to size the guest memory.
+	// container cgroup inside the guest. The guest memory is sized from the
+	// sandbox memory annotation (see addSandboxAnnotations).
 	hostBundle := bundle
 	hostBundle.Spec.Linux = cloneLinuxWithMemoryOverhead(bundle.Spec.Linux, m.memoryOverheadBytes)
 	if err := m.setUnifiedResources(hostBundle); err != nil {

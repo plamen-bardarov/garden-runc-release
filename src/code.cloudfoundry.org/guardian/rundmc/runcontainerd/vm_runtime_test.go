@@ -71,6 +71,35 @@ var _ = Describe("Runcontainerd with a VM runtime", func() {
 			Expect(spec.Annotations).To(HaveKeyWithValue(runcontainerd.SandboxIDAnnotation, "app-handle"))
 		})
 
+		It("sizes the sandbox VM from the container's memory limit", func() {
+			limit := int64(1024 * 1024 * 1024)
+			bundle := goci.Bndl{Spec: specs.Spec{Linux: &specs.Linux{Resources: &specs.LinuxResources{Memory: &specs.LinuxMemory{Limit: &limit}}}}}
+			Expect(runContainerd.Create(log, "app-handle", bundle, garden.ProcessIO{})).To(Succeed())
+
+			_, _, spec, _, _, _ := containerManager.CreateArgsForCall(0)
+			Expect(spec.Annotations).To(HaveKeyWithValue(runcontainerd.SandboxMemoryAnnotation, "1073741824"))
+		})
+
+		It("does not set a sandbox size without a memory limit", func() {
+			bundle := goci.Bndl{Spec: specs.Spec{Linux: &specs.Linux{}}}
+			Expect(runContainerd.Create(log, "app-handle", bundle, garden.ProcessIO{})).To(Succeed())
+
+			_, _, spec, _, _, _ := containerManager.CreateArgsForCall(0)
+			Expect(spec.Annotations).NotTo(HaveKey(runcontainerd.SandboxMemoryAnnotation))
+		})
+
+		It("does not size the sandbox from peas", func() {
+			limit := int64(64 * 1024 * 1024)
+			bundle := goci.Bndl{Spec: specs.Spec{
+				Linux:       &specs.Linux{Resources: &specs.LinuxResources{Memory: &specs.LinuxMemory{Limit: &limit}}},
+				Annotations: map[string]string{"container-type": "pea", "sandbox-container": "app-handle"},
+			}}
+			Expect(runContainerd.Create(log, "envoy-pea", bundle, garden.ProcessIO{})).To(Succeed())
+
+			_, _, spec, _, _, _ := containerManager.CreateArgsForCall(0)
+			Expect(spec.Annotations).NotTo(HaveKey(runcontainerd.SandboxMemoryAnnotation))
+		})
+
 		It("removes the user namespace and id mappings, which the VM runtime does not support, but keeps the container unprivileged", func() {
 			bundle := goci.Bndl{Spec: specs.Spec{Linux: &specs.Linux{}}}.
 				WithNamespaces(goci.NetworkNamespace, goci.UserNamespace, goci.PIDNamespace).

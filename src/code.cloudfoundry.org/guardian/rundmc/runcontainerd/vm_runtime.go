@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/guardian/idmapper"
@@ -22,7 +23,12 @@ const (
 	SandboxContainerTypeAnnotation = "io.kubernetes.cri.container-type"
 	SandboxIDAnnotation            = "io.kubernetes.cri.sandbox-id"
 	SandboxContainerTypeSandbox    = "sandbox"
-	SandboxContainerTypeContainer  = "container"
+	// SandboxMemoryAnnotation is the memory limit of the sandbox in bytes.
+	// Kata Containers runtime-rs sizes the VM of a sandbox from it (static
+	// sandbox resource management: limit + overhead_memory); without it the
+	// VM gets default_memory, whatever the container limit is.
+	SandboxMemoryAnnotation       = "io.kubernetes.cri.sandbox-memory"
+	SandboxContainerTypeContainer = "container"
 
 	// VMTarPathInContainer is where garden bind mounts its static tar binary
 	// into containers of VM runtimes (see RunContainerd.StreamIn).
@@ -176,6 +182,17 @@ func addSandboxAnnotations(bundle *goci.Bndl, id string) {
 
 	bundle.Spec.Annotations[SandboxContainerTypeAnnotation] = SandboxContainerTypeSandbox
 	bundle.Spec.Annotations[SandboxIDAnnotation] = id
+	if limit := memoryLimit(bundle); limit > 0 {
+		bundle.Spec.Annotations[SandboxMemoryAnnotation] = strconv.FormatInt(limit, 10)
+	}
+}
+
+func memoryLimit(bundle *goci.Bndl) int64 {
+	linux := bundle.Spec.Linux
+	if linux == nil || linux.Resources == nil || linux.Resources.Memory == nil || linux.Resources.Memory.Limit == nil {
+		return 0
+	}
+	return *linux.Resources.Memory.Limit
 }
 
 // clearConsoleSizeWithoutTerminal drops the console size of processes without

@@ -4,6 +4,7 @@
 [hypervisor.clh]
 default_vcpus = <%= Integer(p("kata.default_vcpus")) %>
 default_memory = <%= Integer(p("kata.default_memory_mb")) %>
+overhead_memory = <%= Integer(p("kata.overhead_memory_mb")) %>
 <%
   cache = p("kata.virtio_fs_cache")
   raise "kata.virtio_fs_cache must be one of never, auto, always" unless %w[never auto always].include?(cache)

@@ -64,6 +64,14 @@ properties:
       (e.g. --translate-uid / --translate-gid for UID translation).
     default: ["--thread-pool-size=1", "-o", "announce_submounts"]
 
+  kata.overhead_memory_mb:
+    description: |
+      Guest memory in MiB added to the container memory limit when sizing the VM (Kata's overhead_memory, static sandbox
+      resource management: VM memory = limit + overhead). Garden passes the limit as io.kubernetes.cri.sandbox-memory.
+      Covers the guest kernel, agent and page cache outside the container cgroup. kata.default_memory_mb is only used
+      for containers without a memory limit.
+    default: 128
+
   kata.virtio_fs_cache:
     description: |
       Guest caching of the shared filesystem (container root filesystems): never, auto or always (Kata's virtio_fs_cache).
