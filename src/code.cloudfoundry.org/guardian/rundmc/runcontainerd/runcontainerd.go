@@ -270,6 +270,9 @@ func (r *RunContainerd) Attach(log lager.Logger, sandboxID, processID string, io
 }
 
 func (r *RunContainerd) Delete(log lager.Logger, id string) error {
+	if r.isVMRuntime() {
+		return r.deleteVM(log, id)
+	}
 	return r.containerManager.Delete(log, id)
 }
 

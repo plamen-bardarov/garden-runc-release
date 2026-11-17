@@ -33,6 +33,7 @@ import (
 	"code.cloudfoundry.org/guardian/rundmc/sysctl"
 	"code.cloudfoundry.org/guardian/rundmc/users"
 	"code.cloudfoundry.org/guardian/rundmc/vmnetns"
+	"code.cloudfoundry.org/guardian/rundmc/vmreaper"
 	"code.cloudfoundry.org/guardian/sysinfo"
 	"code.cloudfoundry.org/guardian/throttle"
 	"code.cloudfoundry.org/lager/v3"
@@ -184,11 +185,25 @@ func (f *LinuxFactory) WireContainerd(processBuilder *processes.ProcBuilder, use
 
 	containerdManager := runcontainerd.New(nerd, nerd, processBuilder, userLookupper, wireExecer(pidGetter), statser, f.config.Containerd.UseContainerdForProcesses, cgroupManager, f.WireMkdirer(), peaHandlesGetter, f.config.Containers.CleanupProcessDirsOnWait, nerdStopper)
 
-	if vmRuntime {
-		containerdManager.EnableVMRuntime(runcontainerd.VMRuntimeConfig{TarPathInContainer: runcontainerd.VMTarPathInContainer}, nerd)
-	}
-
 	peaRunner := runcontainerd.NewRunContainerPea(containerdManager, nerd, volumizer, f.config.Containers.CleanupProcessDirsOnWait)
+
+	if vmRuntime {
+		gardenCgroupRoot, err := f.config.getGardenCPUCgroup()
+		if err != nil {
+			return nil, nil, nil, nil, nil, err
+		}
+		vmConfig := runcontainerd.VMRuntimeConfig{
+			TarPathInContainer: runcontainerd.VMTarPathInContainer,
+			Reaper:             vmreaper.New(gardenCgroupRoot),
+		}
+		if f.config.Containerd.VMTranslateRootfsIDs {
+			vmConfig.RootfsUIDMappings = f.uidMappings
+			vmConfig.RootfsGIDMappings = f.gidMappings
+		}
+		containerdManager.EnableVMRuntime(vmConfig, nerd)
+		peaRunner.SetBestEffortCleanup(true)
+		log.Info("vm-runtime-config", lager.Data{"translate-rootfs-ids": f.config.Containerd.VMTranslateRootfsIDs, "cgroup-root": gardenCgroupRoot})
+	}
 
 	privilegeChecker := &privchecker.PrivilegeChecker{ContainerManager: nerd, Log: log}
 	peaBundleLoader := runcontainerd.NewBndlLoader(nerd)

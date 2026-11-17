@@ -37,6 +37,22 @@ type VMRuntimeConfig struct {
 	// tar binary bind mounted by garden. It is used to implement
 	// StreamIn/StreamOut by executing tar inside the guest.
 	TarPathInContainer string
+
+	// RootfsUIDMappings and RootfsGIDMappings map container IDs to the owner
+	// IDs of files in the container rootfs on the host, when the rootfs is
+	// id-shifted and the runtime translates IDs on the shared filesystem
+	// (virtiofsd --translate-uid/--translate-gid). Empty for unshifted rootfs.
+	RootfsUIDMappings idmapper.MappingList
+	RootfsGIDMappings idmapper.MappingList
+
+	// Reaper removes processes and VMM users the runtime left behind for a
+	// container. Optional.
+	Reaper VMSandboxReaper
+}
+
+//counterfeiter:generate . VMSandboxReaper
+type VMSandboxReaper interface {
+	Reap(log lager.Logger, handle string) error
 }
 
 type VMTaskManager interface {
@@ -51,6 +67,96 @@ func (r *RunContainerd) EnableVMRuntime(config VMRuntimeConfig, taskManager VMTa
 
 func (r *RunContainerd) isVMRuntime() bool {
 	return r.vmRuntime != nil
+}
+
+// deleteVM deletes the task of a container run by a VM runtime.
+//
+// Peas are containers in the sandbox VM of the container they belong to.
+// Their own cleanup (PeaProcess.Wait) runs only after their process exits,
+// which for long running peas (envoy, liveness checks) happens when the VM
+// is torn down, and then the shim cannot be reached any more. Their tasks and
+// containerd records are therefore removed here first, while the sandbox's
+// shim is still alive.
+//
+// Afterwards anything the runtime left in the container's cgroup is reaped:
+// when a VM fails to start, Kata leaves virtiofsd (and the rootless VMM user)
+// behind, and the cgroup could never be removed.
+func (r *RunContainerd) deleteVM(log lager.Logger, id string) error {
+	peas, err := r.ContainerPeaHandles(log, id)
+	if err != nil {
+		log.Error("listing-peas-failed", err)
+	}
+	for _, pea := range peas {
+		r.removePea(log, pea)
+	}
+
+	err = r.containerManager.Delete(log, id)
+	if r.vmRuntime.Reaper == nil {
+		return err
+	}
+	if reapErr := r.vmRuntime.Reaper.Reap(log, id); reapErr != nil {
+		log.Error("reaping-failed", reapErr)
+		if err == nil {
+			return reapErr
+		}
+	}
+	if err != nil {
+		// the shim may have been stuck and is gone now
+		log.Info("retrying-delete-after-reaping", lager.Data{"error": err.Error()})
+		err = r.containerManager.Delete(log, id)
+	}
+	return err
+}
+
+func (r *RunContainerd) removePea(log lager.Logger, pea string) {
+	if err := r.containerManager.Delete(log, pea); err != nil {
+		log.Error("deleting-pea-task-failed", err, lager.Data{"pea": pea})
+	}
+	if err := r.containerManager.RemoveBundle(log, pea); err != nil {
+		log.Error("removing-pea-container-failed", err, lager.Data{"pea": pea})
+	}
+}
+
+// RemoveOrphanedPeas removes the tasks and containerd records of peas whose
+// sandbox container no longer exists, and returns their handles so that their
+// volumes can be destroyed. Only VM runtimes leave such records behind.
+func (r *RunContainerd) RemoveOrphanedPeas(log lager.Logger) ([]string, error) {
+	if !r.isVMRuntime() {
+		return nil, nil
+	}
+	log = log.Session("remove-orphaned-peas")
+
+	all, err := r.containerManager.BundleIDs(ContainerFilter{Label: "container-type", Value: "pea", ComparisonOp: "=="})
+	if err != nil {
+		return nil, err
+	}
+	sandboxes, err := r.ContainerHandles()
+	if err != nil {
+		return nil, err
+	}
+	owned := map[string]bool{}
+	for _, sandbox := range sandboxes {
+		peas, err := r.ContainerPeaHandles(log, sandbox)
+		if err != nil {
+			return nil, err
+		}
+		for _, pea := range peas {
+			owned[pea] = true
+		}
+	}
+
+	var orphans []string
+	for _, pea := range all {
+		if owned[pea] {
+			continue
+		}
+		r.removePea(log, pea)
+		orphans = append(orphans, pea)
+	}
+	if len(orphans) > 0 {
+		log.Info("removed", lager.Data{"peas": orphans})
+	}
+	return orphans, nil
 }
 
 // addSandboxAnnotations makes the VM runtime run garden containers in their
@@ -294,8 +400,17 @@ func (r *RunContainerd) prepareStreamTarget(log lager.Logger, handle, user, path
 		path = filepath.Join(execUser.Home, path)
 	}
 
-	hostUID := idmapper.MappingList(bundle.Spec.Linux.UIDMappings).Map(execUser.Uid)
-	hostGID := idmapper.MappingList(bundle.Spec.Linux.GIDMappings).Map(execUser.Gid)
+	// The spec carries no id mappings in VM mode (see removeUserNamespace);
+	// the rootfs owner ids are given by the configured rootfs mappings.
+	uidMappings, gidMappings := r.vmRuntime.RootfsUIDMappings, r.vmRuntime.RootfsGIDMappings
+	if len(uidMappings) == 0 {
+		uidMappings = bundle.Spec.Linux.UIDMappings
+	}
+	if len(gidMappings) == 0 {
+		gidMappings = bundle.Spec.Linux.GIDMappings
+	}
+	hostUID := idmapper.MappingList(uidMappings).Map(execUser.Uid)
+	hostGID := idmapper.MappingList(gidMappings).Map(execUser.Gid)
 
 	if create {
 		if err := r.mkdirer.MkdirAs(rootfsPath, hostUID, hostGID, 0755, false, path); err != nil {

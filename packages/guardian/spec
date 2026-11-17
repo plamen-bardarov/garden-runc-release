@@ -76,6 +76,7 @@ files:
   - code.cloudfoundry.org/guardian/rundmc/sysctl/*.go # gosub
   - code.cloudfoundry.org/guardian/rundmc/users/*.go # gosub
   - code.cloudfoundry.org/guardian/rundmc/vmnetns/*.go # gosub
+  - code.cloudfoundry.org/guardian/rundmc/vmreaper/*.go # gosub
   - code.cloudfoundry.org/guardian/sysinfo/*.go # gosub
   - code.cloudfoundry.org/guardian/throttle/*.go # gosub
   - code.cloudfoundry.org/guardian/vendor/code.cloudfoundry.org/lager/v3/*.go # gosub

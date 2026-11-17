@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"code.cloudfoundry.org/garden"
+	"code.cloudfoundry.org/guardian/idmapper"
 	"code.cloudfoundry.org/guardian/rundmc/goci"
 	"code.cloudfoundry.org/guardian/rundmc/runcontainerd"
 	"code.cloudfoundry.org/guardian/rundmc/runcontainerd/runcontainerdfakes"
@@ -216,6 +217,21 @@ var _ = Describe("Runcontainerd with a VM runtime", func() {
 				Expect(entries).To(BeEmpty())
 			})
 
+			It("creates files owned by the shifted ids when the rootfs ids are translated", func() {
+				runContainerd.EnableVMRuntime(runcontainerd.VMRuntimeConfig{
+					TarPathInContainer: "/tmp/garden-tar",
+					RootfsUIDMappings:  idmapper.MappingList{{ContainerID: 0, HostID: 4294967294, Size: 1}, {ContainerID: 1, HostID: 1, Size: 4294967293}},
+					RootfsGIDMappings:  idmapper.MappingList{{ContainerID: 0, HostID: 4294967294, Size: 1}, {ContainerID: 1, HostID: 1, Size: 4294967293}},
+				}, taskManager)
+				userLookupper.LookupReturns(&users.ExecUser{Uid: 0, Gid: 0, Home: "/root"}, nil)
+
+				Expect(runContainerd.StreamIn(log, "app-handle", garden.StreamInSpec{Path: "/app", User: "root", TarStream: strings.NewReader("tar-in")})).To(Succeed())
+
+				_, uid, gid, _, _, _ := mkdirer.MkdirAsArgsForCall(0)
+				Expect(uid).To(Equal(4294967294))
+				Expect(gid).To(Equal(4294967294))
+			})
+
 			It("creates the archive in the guest and streams it from the rootfs, removing it on close", func() {
 				stream, err := runContainerd.StreamOut(log, "app-handle", garden.StreamOutSpec{Path: "/home/vcap/app/", User: "vcap"})
 				Expect(err).NotTo(HaveOccurred())
@@ -233,6 +249,89 @@ var _ = Describe("Runcontainerd with a VM runtime", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(entries).To(BeEmpty())
 			})
+		})
+	})
+
+	Describe("Delete", func() {
+		var reaper *runcontainerdfakes.FakeVMSandboxReaper
+
+		BeforeEach(func() {
+			reaper = new(runcontainerdfakes.FakeVMSandboxReaper)
+			runContainerd.EnableVMRuntime(runcontainerd.VMRuntimeConfig{TarPathInContainer: "/tmp/garden-tar", Reaper: reaper}, taskManager)
+			containerManager.BundleIDsStub = func(filters ...runcontainerd.ContainerFilter) ([]string, error) {
+				if len(filters) == 2 && filters[1].Value == "app-handle" {
+					return []string{"app-handle-envoy", "app-handle-liveness-healthcheck-0"}, nil
+				}
+				return nil, nil
+			}
+		})
+
+		It("removes the peas of the sandbox before the sandbox, then reaps leftovers", func() {
+			Expect(runContainerd.Delete(log, "app-handle")).To(Succeed())
+
+			Expect(containerManager.DeleteCallCount()).To(Equal(3))
+			_, first := containerManager.DeleteArgsForCall(0)
+			_, second := containerManager.DeleteArgsForCall(1)
+			_, last := containerManager.DeleteArgsForCall(2)
+			Expect([]string{first, second}).To(ConsistOf("app-handle-envoy", "app-handle-liveness-healthcheck-0"))
+			Expect(last).To(Equal("app-handle"))
+
+			Expect(containerManager.RemoveBundleCallCount()).To(Equal(2))
+			Expect(reaper.ReapCallCount()).To(Equal(1))
+			_, reaped := reaper.ReapArgsForCall(0)
+			Expect(reaped).To(Equal("app-handle"))
+		})
+
+		It("keeps going when a pea cannot be deleted", func() {
+			containerManager.DeleteStub = func(_ lager.Logger, id string) error {
+				if id == "app-handle-envoy" {
+					return errors.New("shim gone")
+				}
+				return nil
+			}
+			Expect(runContainerd.Delete(log, "app-handle")).To(Succeed())
+			Expect(containerManager.RemoveBundleCallCount()).To(Equal(2))
+		})
+
+		It("retries the delete after reaping when it failed", func() {
+			containerManager.DeleteStub = func(_ lager.Logger, id string) error {
+				if id == "app-handle" && reaper.ReapCallCount() == 0 {
+					return errors.New("vmm exit unconfirmed")
+				}
+				return nil
+			}
+			Expect(runContainerd.Delete(log, "app-handle")).To(Succeed())
+			Expect(containerManager.DeleteCallCount()).To(Equal(4))
+		})
+
+		It("fails when leftovers cannot be reaped", func() {
+			reaper.ReapReturns(errors.New("still alive"))
+			Expect(runContainerd.Delete(log, "app-handle")).To(MatchError("still alive"))
+		})
+	})
+
+	Describe("RemoveOrphanedPeas", func() {
+		It("removes peas whose sandbox no longer exists and returns them", func() {
+			containerManager.BundleIDsStub = func(filters ...runcontainerd.ContainerFilter) ([]string, error) {
+				switch {
+				case len(filters) == 1 && filters[0].ComparisonOp == "==":
+					return []string{"live-envoy", "gone-envoy", "gone-liveness-healthcheck-0"}, nil
+				case len(filters) == 1:
+					return []string{"live"}, nil
+				case filters[1].Value == "live":
+					return []string{"live-envoy"}, nil
+				}
+				return nil, nil
+			}
+
+			orphans, err := runContainerd.RemoveOrphanedPeas(log)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(orphans).To(ConsistOf("gone-envoy", "gone-liveness-healthcheck-0"))
+			Expect(containerManager.RemoveBundleCallCount()).To(Equal(2))
+			for i := 0; i < containerManager.RemoveBundleCallCount(); i++ {
+				_, id := containerManager.RemoveBundleArgsForCall(i)
+				Expect(id).NotTo(Equal("live-envoy"))
+			}
 		})
 	})
 
