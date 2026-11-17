@@ -2,5 +2,13 @@
 set -euo pipefail
 
 tar -xzf kata/kata-clh-*-amd64.tar.gz -C "${BOSH_INSTALL_TARGET}"
+
+# Upstream ships cloud-hypervisor as 0744. With a rootless VMM the hypervisor is executed by an
+# unprivileged per-sandbox user, so binaries must be world executable.
+chmod 0755 "${BOSH_INSTALL_TARGET}"/opt/kata/bin/* \
+  "${BOSH_INSTALL_TARGET}"/opt/kata/libexec/* \
+  "${BOSH_INSTALL_TARGET}"/opt/kata/runtime-rs/bin/*
+find "${BOSH_INSTALL_TARGET}/opt/kata/share" -type f -exec chmod a+r {} +
+
 test -x "${BOSH_INSTALL_TARGET}/opt/kata/bin/cloud-hypervisor"
 test -x "${BOSH_INSTALL_TARGET}/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
