@@ -87,17 +87,38 @@ func TestPrepareAdjustRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("routes: %v", err)
 	}
-	foundPeer := false
+	foundPeer, foundDefault := false, false
 	for _, r := range routes {
 		if r.Dst != nil && r.Dst.IP.Equal(net.ParseIP("169.254.0.1")) {
 			foundPeer = true
 			if r.Protocol != unix.RTPROT_BOOT {
-				t.Fatalf("peer route still has protocol %d", r.Protocol)
+				t.Fatalf("peer route has protocol %d, want boot", r.Protocol)
+			}
+			if !r.Src.Equal(net.ParseIP("10.255.0.2")) {
+				t.Fatalf("peer route src %s", r.Src)
 			}
 		}
+		if (r.Dst == nil || r.Dst.String() == "0.0.0.0/0") && r.Gw.Equal(net.ParseIP("169.254.0.1")) {
+			foundDefault = true
+		}
 	}
-	if !foundPeer {
-		t.Fatalf("peer route missing: %+v", routes)
+	if !foundPeer || !foundDefault {
+		t.Fatalf("peer route (%v) or default route (%v) missing: %+v", foundPeer, foundDefault, routes)
+	}
+
+	// Kata runtime-rs takes IFA_ADDRESS, which is the peer for point-to-point
+	// addresses: the address must now be a plain /32 without peer
+	addrs, err := nl.AddrList(container, netlink.FAMILY_V4)
+	if err != nil {
+		t.Fatalf("addrs: %v", err)
+	}
+	if len(addrs) != 1 || !addrs[0].IP.Equal(net.ParseIP("10.255.0.2")) || addrs[0].Peer != nil {
+		t.Fatalf("expected plain address 10.255.0.2/32, got %+v", addrs)
+	}
+
+	// idempotent (no point-to-point address left)
+	if err := preparer.AdjustForRuntime(log, "handle-1"); err != nil {
+		t.Fatalf("second adjust: %v", err)
 	}
 
 	// the netns must survive the holder process (done() was called)

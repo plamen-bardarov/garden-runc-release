@@ -81,17 +81,24 @@ func (p *BindMountPreparer) Prepare(log lager.Logger, handle string) (int, strin
 	return holder.Process.Pid, nsPath, stopHolder, nil
 }
 
-// AdjustForRuntime makes peer routes visible to the VM runtime.
+// AdjustForRuntime makes the container network configuration replicable by
+// the VM runtime.
 //
 // CNI plugins such as silk configure the container interface with a
 // point-to-point address (e.g. 10.255.0.2/32 peer 169.254.0.1) and a default
-// route via the peer. The route to the peer is created by the kernel
-// (proto kernel). Kata Containers does not copy kernel routes into the guest,
-// expecting the guest kernel to recreate them from the interface addresses,
-// but its address model has no peer. Without the peer route the guest cannot
-// add the default route ("Network is unreachable"). Re-tagging these peer
-// routes as "proto boot" keeps them identical on the host and makes Kata
-// replicate them in the guest.
+// route via the peer. Kata Containers copies addresses and routes into the
+// guest, but:
+//   - its address model has no peer, and Kata runtime-rs even reads the peer
+//     (IFA_ADDRESS) instead of the local address (IFA_LOCAL), so the guest
+//     got the gateway's IP;
+//   - it does not copy kernel routes (proto kernel), such as the route to the
+//     peer, so the guest cannot add the default route via the peer.
+//
+// Each point-to-point address is therefore replaced by the same plain /32
+// address plus an explicit link route to the peer ("proto boot"), and the
+// other routes of the link, which the kernel removes together with the
+// address, are restored. The resulting forwarding behaviour on the host is
+// unchanged.
 func (p *BindMountPreparer) AdjustForRuntime(log lager.Logger, handle string) error {
 	log = log.Session("adjust-netns", lager.Data{"handle": handle})
 
@@ -116,47 +123,84 @@ func (p *BindMountPreparer) AdjustForRuntime(log lager.Logger, handle string) er
 		if link.Attrs().Flags&net.FlagLoopback != 0 {
 			continue
 		}
-
-		addrs, err := nl.AddrList(link, netlink.FAMILY_ALL)
-		if err != nil {
-			return fmt.Errorf("listing addresses of %s: %w", link.Attrs().Name, err)
-		}
-
-		routes, err := nl.RouteList(link, netlink.FAMILY_ALL)
-		if err != nil {
-			return fmt.Errorf("listing routes of %s: %w", link.Attrs().Name, err)
-		}
-
-		for _, route := range routes {
-			if route.Protocol != unix.RTPROT_KERNEL || route.Dst == nil || !isPeer(route.Dst, addrs) {
-				continue
-			}
-
-			adjusted := netlink.Route{
-				LinkIndex: route.LinkIndex,
-				Dst:       route.Dst,
-				Src:       route.Src,
-				Scope:     route.Scope,
-				Table:     route.Table,
-				Protocol:  unix.RTPROT_BOOT,
-			}
-			if err := nl.RouteReplace(&adjusted); err != nil {
-				return fmt.Errorf("re-tagging peer route %s on %s: %w", route.Dst, link.Attrs().Name, err)
-			}
-			log.Info("retagged-peer-route", lager.Data{"link": link.Attrs().Name, "dst": route.Dst.String()})
+		if err := adjustLink(log, nl, link); err != nil {
+			return fmt.Errorf("adjusting %s: %w", link.Attrs().Name, err)
 		}
 	}
 
 	return nil
 }
 
-func isPeer(dst *net.IPNet, addrs []netlink.Addr) bool {
+func adjustLink(log lager.Logger, nl *netlink.Handle, link netlink.Link) error {
+	addrs, err := nl.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return fmt.Errorf("listing addresses: %w", err)
+	}
+
+	var peerAddrs []netlink.Addr
 	for _, addr := range addrs {
-		if addr.Peer != nil && addr.Peer.IP.Equal(dst.IP) {
-			return true
+		if addr.Peer != nil {
+			peerAddrs = append(peerAddrs, addr)
 		}
 	}
-	return false
+	if len(peerAddrs) == 0 {
+		return nil
+	}
+
+	routes, err := nl.RouteList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return fmt.Errorf("listing routes: %w", err)
+	}
+	var restore []netlink.Route
+	for _, route := range routes {
+		if route.Protocol == unix.RTPROT_KERNEL {
+			continue
+		}
+		restore = append(restore, netlink.Route{
+			LinkIndex: route.LinkIndex,
+			Dst:       route.Dst,
+			Gw:        route.Gw,
+			Src:       route.Src,
+			Scope:     route.Scope,
+			Table:     route.Table,
+			Priority:  route.Priority,
+			MTU:       route.MTU,
+			Protocol:  route.Protocol,
+		})
+	}
+
+	for _, addr := range peerAddrs {
+		plain := &netlink.Addr{
+			IPNet: &net.IPNet{IP: addr.IP, Mask: addr.Mask},
+			Scope: addr.Scope,
+			Label: addr.Label,
+		}
+		if err := nl.AddrDel(link, &addr); err != nil {
+			return fmt.Errorf("removing point-to-point address %s: %w", addr.IPNet, err)
+		}
+		if err := nl.AddrAdd(link, plain); err != nil {
+			return fmt.Errorf("adding address %s: %w", plain.IPNet, err)
+		}
+		peerRoute := &netlink.Route{
+			LinkIndex: link.Attrs().Index,
+			Dst:       addr.Peer,
+			Src:       addr.IP,
+			Scope:     netlink.SCOPE_LINK,
+			Protocol:  unix.RTPROT_BOOT,
+		}
+		if err := nl.RouteReplace(peerRoute); err != nil {
+			return fmt.Errorf("adding route to peer %s: %w", addr.Peer, err)
+		}
+		log.Info("converted-point-to-point-address", lager.Data{"address": plain.IPNet.String(), "peer": addr.Peer.String()})
+	}
+
+	for i := range restore {
+		if err := nl.RouteReplace(&restore[i]); err != nil {
+			return fmt.Errorf("restoring route %s: %w", restore[i].String(), err)
+		}
+	}
+
+	return nil
 }
 
 func (p *BindMountPreparer) Release(log lager.Logger, handle string) error {
