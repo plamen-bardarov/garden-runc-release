@@ -97,8 +97,9 @@ func (p *BindMountPreparer) Prepare(log lager.Logger, handle string) (int, strin
 // Each point-to-point address is therefore replaced by the same plain /32
 // address plus an explicit link route to the peer ("proto boot"), and the
 // other routes of the link, which the kernel removes together with the
-// address, are restored. The resulting forwarding behaviour on the host is
-// unchanged.
+// address, are restored together with its permanent neighbour entries
+// (silk's static ARP entry for the peer). The resulting forwarding behaviour
+// on the host is unchanged.
 func (p *BindMountPreparer) AdjustForRuntime(log lager.Logger, handle string) error {
 	log = log.Session("adjust-netns", lager.Data{"handle": handle})
 
@@ -169,6 +170,13 @@ func adjustLink(log lager.Logger, nl *netlink.Handle, link netlink.Link) error {
 		})
 	}
 
+	// Removing the last address flushes the link's neighbours, including the
+	// permanent entry for the peer that CNI plugins add on NOARP links.
+	neighs, err := nl.NeighList(link.Attrs().Index, netlink.FAMILY_ALL)
+	if err != nil {
+		return fmt.Errorf("listing neighbours: %w", err)
+	}
+
 	for _, addr := range peerAddrs {
 		plain := &netlink.Addr{
 			IPNet: &net.IPNet{IP: addr.IP, Mask: addr.Mask},
@@ -197,6 +205,22 @@ func adjustLink(log lager.Logger, nl *netlink.Handle, link netlink.Link) error {
 	for i := range restore {
 		if err := nl.RouteReplace(&restore[i]); err != nil {
 			return fmt.Errorf("restoring route %s: %w", restore[i].String(), err)
+		}
+	}
+
+	for _, neigh := range neighs {
+		if neigh.State&(netlink.NUD_PERMANENT|netlink.NUD_NOARP) == 0 || neigh.HardwareAddr == nil {
+			continue
+		}
+		restored := netlink.Neigh{
+			LinkIndex:    neigh.LinkIndex,
+			Family:       neigh.Family,
+			State:        neigh.State,
+			IP:           neigh.IP,
+			HardwareAddr: neigh.HardwareAddr,
+		}
+		if err := nl.NeighSet(&restored); err != nil {
+			return fmt.Errorf("restoring neighbour %s: %w", neigh.IP, err)
 		}
 	}
 

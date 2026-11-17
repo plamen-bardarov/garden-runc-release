@@ -77,6 +77,17 @@ func TestPrepareAdjustRelease(t *testing.T) {
 		t.Fatalf("default route: %v", err)
 	}
 
+	peerMAC, _ := net.ParseMAC("aa:aa:0a:ff:00:02")
+	if err := nl.NeighAdd(&netlink.Neigh{
+		LinkIndex:    container.Attrs().Index,
+		Family:       netlink.FAMILY_V4,
+		State:        netlink.NUD_PERMANENT,
+		IP:           net.ParseIP("169.254.0.1"),
+		HardwareAddr: peerMAC,
+	}); err != nil {
+		t.Fatalf("neigh: %v", err)
+	}
+
 	done()
 
 	if err := preparer.AdjustForRuntime(log, "handle-1"); err != nil {
@@ -114,6 +125,21 @@ func TestPrepareAdjustRelease(t *testing.T) {
 	}
 	if len(addrs) != 1 || !addrs[0].IP.Equal(net.ParseIP("10.255.0.2")) || addrs[0].Peer != nil {
 		t.Fatalf("expected plain address 10.255.0.2/32, got %+v", addrs)
+	}
+
+	// silk's static ARP entry for the peer must survive the address change
+	neighs, err := nl.NeighList(container.Attrs().Index, netlink.FAMILY_V4)
+	if err != nil {
+		t.Fatalf("neighs: %v", err)
+	}
+	foundNeigh := false
+	for _, n := range neighs {
+		if n.IP.Equal(net.ParseIP("169.254.0.1")) && n.HardwareAddr.String() == peerMAC.String() && n.State&netlink.NUD_PERMANENT != 0 {
+			foundNeigh = true
+		}
+	}
+	if !foundNeigh {
+		t.Fatalf("permanent neighbour for the peer missing: %+v", neighs)
 	}
 
 	// idempotent (no point-to-point address left)
