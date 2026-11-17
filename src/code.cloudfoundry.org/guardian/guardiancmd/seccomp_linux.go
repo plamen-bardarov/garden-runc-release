@@ -64,6 +64,7 @@ func buildSeccomp() (*specs.LinuxSeccomp, error) {
 			AllowSyscall("fchdir"),
 			AllowSyscall("fchmod"),
 			AllowSyscall("fchmodat"),
+			AllowSyscall("fchmodat2"),
 			AllowSyscall("fchown"),
 			AllowSyscall("fchown32"),
 			AllowSyscall("fchownat"),
