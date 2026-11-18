@@ -49,7 +49,9 @@ properties:
     default: 4294967294
 
   kata.default_vcpus:
-    description: vCPUs of the guest VM at boot (CPU limits of the container are applied on top).
+    description: |
+      vCPUs of every sandbox VM. Garden passes a memory limit but no CPU limit, so with Kata's static sandbox sizing the
+      VM gets overhead_vcpus (workload CPU 0 + overhead), not default_vcpus; the job sets both to this value.
     default: 1
 
   kata.default_memory_mb:
